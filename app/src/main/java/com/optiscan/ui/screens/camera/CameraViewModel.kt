@@ -267,7 +267,6 @@ class CameraViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         cameraManager.shutdown()
-        ocrProcessor.close()
         // Release held bitmaps to avoid leaks
         _uiState.value.previewBitmap?.let { if (!it.isRecycled) it.recycle() }
         val phase = _uiState.value.phase

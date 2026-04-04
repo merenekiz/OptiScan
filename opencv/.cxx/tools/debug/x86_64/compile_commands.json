@@ -1,7 +1,0 @@
-[
-{
-  "directory": "/Users/merenekiz/vscode/OptiScan/opencv/.cxx/Debug/6w6w33kz/x86_64",
-  "command": "/Users/merenekiz/Library/Android/sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=x86_64-none-linux-android26 --sysroot=/Users/merenekiz/Library/Android/sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -fno-limit-debug-info  -fPIC -o CMakeFiles/opencv_jni_shared.dir/dummy.cpp.o -c /Users/merenekiz/vscode/OptiScan/opencv/libcxx_helper/dummy.cpp",
-  "file": "/Users/merenekiz/vscode/OptiScan/opencv/libcxx_helper/dummy.cpp"
-}
-]

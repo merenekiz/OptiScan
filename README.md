@@ -1,119 +1,121 @@
 # OptiScan
 
-Native Android OMR (Optical Mark Recognition) + OCR exam reader application. Scan printed answer sheets with your phone camera, automatically detect filled bubbles, read student information via OCR, and generate graded results with Excel export.
+Android tabanlı OMR (Optik İşaret Tanıma) + OCR sınav okuyucu uygulaması. Basılı cevap kağıtlarını telefon kamerasıyla tarayın, doldurulmuş baloncukları otomatik algılayın, OCR ile öğrenci bilgilerini okuyun ve notlandırılmış sonuçları Excel olarak dışa aktarın.
 
-**Developer:** merenekiz
+**Geliştiren:** merenekiz
 
-## Features
+> **APK İndir:** [`app/build/outputs/apk/debug/app-debug.apk`](app/build/outputs/apk/debug/app-debug.apk)
 
-- **OMR Bubble Detection** — Detects filled bubbles on printed answer sheets using OpenCV adaptive thresholding
-- **OCR Student Info** — Reads handwritten student name, number, and class via ML Kit Text Recognition
-- **QR Code Support** — Auto-configure exam settings by scanning a QR code on the form
-- **Auto Grading** — Calculates scores with configurable correct/wrong point values
-- **PDF Form Generator** — Generate printable OMR answer sheets (A4) for any question count (1-100)
-- **Excel Export** — Export results to `.xlsx` with per-student scores via Apache POI
-- **Visual Feedback** — Color-coded overlay on scanned forms (green = correct, red = wrong)
-- **Fully Offline** — All processing runs on-device, no internet required
-- **Dynamic Layout** — Bubble grid auto-scales: single column for 1-30 questions, dual column for 31+
+## Özellikler
 
-## Tech Stack
+- **OMR Baloncuk Algılama** — OpenCV adaptif eşikleme ile basılı cevap kağıtlarındaki doldurulmuş baloncukları algılar
+- **OCR Öğrenci Bilgisi** — ML Kit ile ad soyad, öğrenci no ve şube bilgilerini okur
+- **QR Kod Desteği** — Form üzerindeki QR kodu okuyarak sınav ayarlarını otomatik yapılandırır
+- **Otomatik Notlandırma** — Yapılandırılabilir doğru/yanlış puan değerleriyle not hesaplar
+- **PDF Form Oluşturucu** — Herhangi bir soru sayısı (1-100) için yazdırılabilir A4 optik form oluşturur
+- **Excel Dışa Aktarma** — Apache POI ile öğrenci bazlı sonuçları `.xlsx` olarak dışa aktarır
+- **Görsel Geri Bildirim** — Taranan formlarda renkli işaretleme (yeşil = doğru, kırmızı = yanlış)
+- **Tamamen Çevrimdışı** — Tüm işlemler cihaz üzerinde çalışır, internet gerekmez
+- **Dinamik Düzen** — Baloncuk ızgarası otomatik ölçeklenir: 1-30 soru tek sütun, 31+ çift sütun
 
-| Layer | Technology |
-|-------|-----------|
-| Language | Kotlin |
-| UI | Jetpack Compose + Material3 |
-| Camera | CameraX |
-| Image Processing | OpenCV 4.x (local module) |
-| OCR | Google ML Kit Text Recognition (bundled) |
-| QR Detection | Google ML Kit Barcode Scanning (bundled) |
-| Database | Room |
-| DI | Hilt |
-| Excel Export | Apache POI 5.2.5 |
+## Teknoloji
+
+| Katman | Teknoloji |
+|--------|-----------|
+| Dil | Kotlin |
+| Arayüz | Jetpack Compose + Material3 |
+| Kamera | CameraX |
+| Görüntü İşleme | OpenCV 4.x (yerel modül) |
+| OCR | Google ML Kit Text Recognition (gömülü) |
+| QR Algılama | Google ML Kit Barcode Scanning (gömülü) |
+| Veritabanı | Room |
+| Bağımlılık Enjeksiyonu | Hilt |
+| Excel Dışa Aktarma | Apache POI 5.2.5 |
 | Min SDK | 26 (Android 8.0) |
-| Target SDK | 35 |
+| Hedef SDK | 35 |
 
-## Project Structure
+## Proje Yapısı
 
 ```
 app/src/main/java/com/optiscan/
-├── analysis/          # GradingEngine, scoring models
-├── camera/            # CameraX manager
-├── data/              # Room database, DAOs, entities, repositories
-├── di/                # Hilt modules
-├── export/            # ExcelExporter, FormPdfGenerator
-├── ocr/               # ML Kit OCR processor
-├── processing/        # BubbleDetector, PerspectiveTransformer, OmrProcessor
-├── qr/                # QR/Barcode scanner
+├── analysis/          # NotlandırmaMotoru, puanlama modelleri
+├── camera/            # CameraX yöneticisi
+├── data/              # Room veritabanı, DAO'lar, entity'ler, repository'ler
+├── di/                # Hilt modülleri
+├── export/            # Excel dışa aktarıcı, PDF form oluşturucu
+├── ocr/               # ML Kit OCR işlemcisi
+├── processing/        # BaloncukAlgılayıcı, PerspektifDönüştürücü, Omrİşlemci
+├── qr/                # QR/Barkod tarayıcı
 └── ui/
-    ├── navigation/    # NavGraph, Screen routes
-    ├── screens/       # Home, Exams, Camera, Results, Export
-    └── theme/         # Colors, Typography, Theme
+    ├── navigation/    # Navigasyon grafiği, ekran rotaları
+    ├── screens/       # Ana Sayfa, Sınavlar, Kamera, Sonuçlar, Dışa Aktarma
+    └── theme/         # Renkler, Tipografi, Tema
 ```
 
-## How It Works
+## Nasıl Çalışır
 
-1. **Create Exam** — Set title, subject, question count, and answer key
-2. **Generate Form** — Print the auto-generated OMR PDF form
-3. **Scan** — Point the camera at a filled form or pick from gallery
-4. **Process** — The pipeline runs: Perspective Correction → Bubble Detection → OCR → Grading
-5. **Review** — See color-coded results with correct/wrong/empty breakdown
-6. **Export** — Download results as Excel spreadsheet
+1. **Sınav Oluştur** — Başlık, ders, soru sayısı ve cevap anahtarını belirle
+2. **Form Oluştur** — Otomatik oluşturulan OMR PDF formunu yazdır
+3. **Tara** — Kamerayı doldurulan forma çevir veya galeriden seç
+4. **İşle** — Pipeline çalışır: Perspektif Düzeltme → Baloncuk Algılama → OCR → Notlandırma
+5. **İncele** — Renkli sonuçları doğru/yanlış/boş dağılımıyla gör
+6. **Dışa Aktar** — Sonuçları Excel tablosu olarak indir
 
-## Installation (APK)
+## Kurulum (APK)
 
-### Download
+### APK Dosya Yolu
 
-The pre-built APK is located at:
+Derlenmiş APK dosyası şu konumdadır:
 
 ```
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-To build it yourself:
+Kendiniz derlemek isterseniz:
 
 ```bash
 ./gradlew assembleDebug
 ```
 
-The output APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
+Çıktı APK: `app/build/outputs/apk/debug/app-debug.apk`
 
-### Install on Your Phone
+### Telefona Yükleme
 
-#### Option 1: USB (adb)
+#### Yöntem 1: USB ile (adb)
 
 ```bash
-# Connect phone via USB with USB Debugging enabled
+# Telefonu USB ile bağlayın (USB Hata Ayıklama açık olmalı)
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-#### Option 2: Direct Transfer
+#### Yöntem 2: Doğrudan Aktarma
 
-1. Transfer `app-debug.apk` to your phone (via USB file transfer, Google Drive, Telegram, etc.)
-2. On your phone, go to **Settings > Security > Install Unknown Apps** and allow your file manager
-3. Open the APK file on your phone and tap **Install**
-4. Launch **OptiScan** from your app drawer
+1. `app-debug.apk` dosyasını telefonunuza aktarın (USB dosya aktarımı, Google Drive, Telegram vb.)
+2. Telefonunuzda **Ayarlar > Güvenlik > Bilinmeyen Uygulamaları Yükle** bölümünden dosya yöneticinize izin verin
+3. APK dosyasını telefonunuzda açın ve **Yükle** butonuna dokunun
+4. Uygulama çekmecesinden **OptiScan**'i başlatın
 
-> **Note:** This is a debug build signed with a debug key. It works on any Android 8.0+ device but cannot be uploaded to Google Play. For a release build, configure signing in `app/build.gradle.kts`.
+> **Not:** Bu bir debug derlemesidir ve debug anahtarı ile imzalanmıştır. Android 8.0+ tüm cihazlarda çalışır ancak Google Play'e yüklenemez. Release derlemesi için `app/build.gradle.kts` dosyasında imzalama ayarlarını yapılandırın.
 
-### Enable USB Debugging (Required for adb)
+### USB Hata Ayıklama Nasıl Açılır (adb için gerekli)
 
-1. Go to **Settings > About Phone**
-2. Tap **Build Number** 7 times until "You are now a developer" appears
-3. Go to **Settings > Developer Options**
-4. Enable **USB Debugging**
-5. Connect phone to computer via USB
-6. Accept the debugging authorization dialog on your phone
+1. **Ayarlar > Telefon Hakkında** bölümüne gidin
+2. **Derleme Numarası**'na "Artık bir geliştiricisiniz" mesajı görünene kadar 7 kez dokunun
+3. **Ayarlar > Geliştirici Seçenekleri** bölümüne gidin
+4. **USB Hata Ayıklama**'yı etkinleştirin
+5. Telefonu USB ile bilgisayara bağlayın
+6. Telefonda çıkan hata ayıklama izni iletişim kutusunu kabul edin
 
-## Building from Source
+## Kaynak Koddan Derleme
 
-### Prerequisites
+### Gereksinimler
 
-- Android Studio Hedgehog (2023.1.1) or newer
+- Android Studio Hedgehog (2023.1.1) veya üstü
 - JDK 17
 - Android SDK 35
-- NDK (for OpenCV native libs)
+- NDK (OpenCV native kütüphaneleri için)
 
-### Steps
+### Adımlar
 
 ```bash
 git clone https://github.com/merenekiz/OptiScan.git
@@ -121,37 +123,38 @@ cd OptiScan
 ./gradlew assembleDebug
 ```
 
-The OpenCV module is included locally in the `opencv/` directory — no additional setup needed.
+OpenCV modülü `opencv/` dizininde yerel olarak dahildir — ek kurulum gerekmez.
 
-## Permissions
+## İzinler
 
-| Permission | Purpose |
-|-----------|---------|
-| `CAMERA` | Scan answer sheets in real-time |
-| `READ_MEDIA_IMAGES` | Pick form images from gallery |
-| `WRITE_EXTERNAL_STORAGE` (API ≤ 29) | Legacy storage access |
+| İzin | Kullanım Amacı |
+|------|----------------|
+| `CAMERA` | Cevap kağıtlarını gerçek zamanlı tarama |
+| `READ_MEDIA_IMAGES` | Galeriden form resmi seçme |
+| `WRITE_EXTERNAL_STORAGE` (API ≤ 29) | Eski depolama erişimi |
 
-## Configuration
+## Yapılandırma
 
-### Exam Setup
+### Sınav Ayarları
 
-- **Question Count:** 1-100 (single column up to 30, dual column for 31+)
-- **Correct Point:** Auto-calculated as 100 / question count
-- **Wrong Penalty:** Configurable (0 = no penalty)
-- **Answer Key:** Visual bubble selector (A-E per question)
+- **Soru Sayısı:** 1-100 (30'a kadar tek sütun, 31+ çift sütun)
+- **Doğru Puanı:** Otomatik hesaplanır (100 / soru sayısı)
+- **Yanlış Cezası:** Ayarlanabilir (0 = ceza yok)
+- **Cevap Anahtarı:** Görsel baloncuk seçici (her soru için A-E)
 
-### OMR Detection Parameters
+### OMR Algılama Parametreleri
 
-Located in `BubbleDetector.kt`:
+`BubbleDetector.kt` dosyasında bulunur:
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `SHEET_WIDTH` | 800px | Warped sheet width |
-| `SHEET_HEIGHT` | 1100px | Warped sheet height |
-| `BUBBLE_DIAMETER` | 22px | Detection circle size |
-| `FILL_THRESHOLD` | 0.40 | Min fill % to count as marked |
-| `AMBIGUOUS_THRESHOLD` | 0.20 | Min fill % for uncertain mark |
+| Parametre | Değer | Açıklama |
+|-----------|-------|----------|
+| `SHEET_WIDTH` | 800px | Düzeltilmiş form genişliği |
+| `SHEET_HEIGHT` | 1100px | Düzeltilmiş form yüksekliği |
+| `GRID_START_Y` | 240px | Baloncuk ızgarası başlangıç Y koordinatı |
+| `BUBBLE_DIAMETER` | 22px | Algılama daire boyutu |
+| `FILL_THRESHOLD` | 0.40 | İşaretli sayılması için min doluluk % |
+| `AMBIGUOUS_THRESHOLD` | 0.20 | Belirsiz işaret için min doluluk % |
 
-## License
+## Lisans
 
-This project is proprietary software developed by merenekiz. All rights reserved.
+Bu proje merenekiz tarafından geliştirilen özel bir yazılımdır. Tüm hakları saklıdır.

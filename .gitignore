@@ -30,6 +30,7 @@ local.properties
 
 # NDK
 obj/
+opencv/.cxx/
 
 # Proguard
 app/proguard-rules.pro

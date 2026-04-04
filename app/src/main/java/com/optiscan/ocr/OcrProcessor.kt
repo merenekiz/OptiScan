@@ -18,10 +18,10 @@ import kotlin.coroutines.resume
  * regions of the warped 800×1100 answer sheet using ML Kit Text Recognition.
  *
  * Form layout (BubbleDetector coordinate space):
- *   - Title: y=35-68 (NOT student info — skip this)
- *   - Ad Soyad box: y=70-105, x=100-760
- *   - Öğrenci No box: y=100-135, x=100-470
- *   - Şube box:     y=100-135, x=510-760
+ *   - Title: y=35-70 (NOT student info — skip this)
+ *   - Ad Soyad box: y=76-106, x=110-770
+ *   - Öğrenci No box: y=116-146, x=120-~454
+ *   - Şube box:     y=116-146, x=~514-770
  */
 @Singleton
 class OcrProcessor @Inject constructor() {
@@ -30,17 +30,19 @@ class OcrProcessor @Inject constructor() {
         private const val TAG = "OcrProcessor"
 
         // Region coordinates in 800×1100 warped space
-        // Ad Soyad region — after the label "Ad Soyad:", the writable area
-        private const val NAME_X1 = 100; private const val NAME_Y1 = 70
-        private const val NAME_X2 = 760; private const val NAME_Y2 = 105
+        // Form layout: Name box (110,76)-(770,106), No box (120,116)-(~454,146), Sube box (~514,116)-(770,146)
+        // Crop inside the boxes with padding
+        // Ad Soyad — inside name box
+        private const val NAME_X1 = 105; private const val NAME_Y1 = 72
+        private const val NAME_X2 = 775; private const val NAME_Y2 = 112
 
-        // Öğrenci No region (box starts at margin+80 in PDF)
-        private const val NO_X1 = 110; private const val NO_Y1 = 100
-        private const val NO_X2 = 470; private const val NO_Y2 = 135
+        // Öğrenci No — inside number box
+        private const val NO_X1 = 110; private const val NO_Y1 = 112
+        private const val NO_X2 = 470; private const val NO_Y2 = 152
 
-        // Şube region
-        private const val SUBE_X1 = 510; private const val SUBE_Y1 = 100
-        private const val SUBE_X2 = 760; private const val SUBE_Y2 = 135
+        // Şube — inside sube box
+        private const val SUBE_X1 = 500; private const val SUBE_Y1 = 112
+        private const val SUBE_X2 = 775; private const val SUBE_Y2 = 152
     }
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -138,7 +140,8 @@ class OcrProcessor @Inject constructor() {
 
     private fun cleanClass(raw: String): String {
         var text = raw.trim()
-        text = text.replace(Regex("(?i)^şube\\s*:?\\s*"), "")
+        // Remove label prefix — handles Şube/Sube/şube and partial OCR reads like "be:" or "e:"
+        text = text.replace(Regex("(?i)^[sşŞS]?[uüUÜ]?[bB]?[eE]\\s*:?\\s*"), "")
         text = text.replace(Regex("(?i)^sınıf\\s*:?\\s*"), "")
         text = text.replace(Regex("(?i)^section\\s*:?\\s*"), "")
         return text.trim().take(10)

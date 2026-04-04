@@ -26,7 +26,7 @@ class BubbleDetector @Inject constructor() {
         const val SHEET_HEIGHT = 1100
 
         // Fixed layout anchors
-        const val GRID_START_Y = 200       // where bubble grid begins
+        const val GRID_START_Y = 240       // where bubble grid begins
         const val GRID_MARGIN_X = 30       // left/right margin
         const val GRID_BOTTOM_MARGIN = 30  // bottom margin
         const val NUM_OPTIONS = 5

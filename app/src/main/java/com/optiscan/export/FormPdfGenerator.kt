@@ -113,16 +113,16 @@ class FormPdfGenerator @Inject constructor(
 
     private fun drawHeader(canvas: Canvas, exam: ExamEntity) {
         val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK; textSize = 18f; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
+            color = Color.BLACK; textSize = 20f; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
         }
         canvas.drawText(exam.title, FORM_W / 2f, 42f, titlePaint)
 
         val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.DKGRAY; textSize = 11f; textAlign = Paint.Align.CENTER
+            color = Color.DKGRAY; textSize = 12f; textAlign = Paint.Align.CENTER
         }
         canvas.drawText(
             "Ders: ${exam.subject}  |  ${exam.questionCount} Soru  |  Her doğru: %.2f puan".format(exam.correctPoint),
-            FORM_W / 2f, 60f, subPaint
+            FORM_W / 2f, 62f, subPaint
         )
     }
 
@@ -130,28 +130,28 @@ class FormPdfGenerator @Inject constructor(
         val m = BubbleDetector.GRID_MARGIN_X.toFloat()
         val endX = FORM_W - m
         val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK; textSize = 12f; typeface = Typeface.DEFAULT_BOLD
+            color = Color.BLACK; textSize = 14f; typeface = Typeface.DEFAULT_BOLD
         }
-        val boxPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 0.8f }
+        val boxPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 1f }
 
-        // Row 1: Ad Soyad
-        canvas.drawText("Ad Soyad:", m, 88f, labelPaint)
-        canvas.drawRect(m + 70f, 74f, endX, 94f, boxPaint)
+        // Row 1: Ad Soyad (box height = 30px)
+        canvas.drawText("Ad Soyad:", m, 92f, labelPaint)
+        canvas.drawRect(m + 80f, 76f, endX, 106f, boxPaint)
 
-        // Row 2: Öğrenci No + Şube
+        // Row 2: Öğrenci No + Şube (box height = 30px)
         val midX = m + (endX - m) * 0.6f
-        canvas.drawText("Öğrenci No:", m, 118f, labelPaint)
-        canvas.drawRect(m + 80f, 104f, midX - 10f, 124f, boxPaint)
-        canvas.drawText("Şube:", midX, 118f, labelPaint)
-        canvas.drawRect(midX + 40f, 104f, endX, 124f, boxPaint)
+        canvas.drawText("Öğrenci No:", m, 132f, labelPaint)
+        canvas.drawRect(m + 90f, 116f, midX - 10f, 146f, boxPaint)
+        canvas.drawText("Şube:", midX, 132f, labelPaint)
+        canvas.drawRect(midX + 40f, 116f, endX, 146f, boxPaint)
 
         // Separator
         val sepPaint = Paint().apply { color = Color.LTGRAY; style = Paint.Style.STROKE; strokeWidth = 0.5f }
-        canvas.drawLine(m, 138f, endX, 138f, sepPaint)
+        canvas.drawLine(m, 165f, endX, 165f, sepPaint)
 
         // Instructions
-        val instrPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.GRAY; textSize = 8f }
-        canvas.drawText("Her soru için yalnızca bir seçenek işaretleyiniz.", m, 152f, instrPaint)
+        val instrPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.GRAY; textSize = 9f }
+        canvas.drawText("Her soru için yalnızca bir seçenek işaretleyiniz.", m, 178f, instrPaint)
     }
 
     private fun drawAlignmentMarkers(canvas: Canvas, formW: Int, formH: Int) {

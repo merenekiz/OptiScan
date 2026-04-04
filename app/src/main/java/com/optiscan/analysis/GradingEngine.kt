@@ -99,7 +99,7 @@ class GradingEngine @Inject constructor() {
 
         val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
         val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeWidth = 2.5f
+            style = Paint.Style.STROKE; strokeWidth = 3f
         }
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = 10f
@@ -111,35 +111,55 @@ class GradingEngine @Inject constructor() {
         val optionLabels = listOf("A", "B", "C", "D", "E")
         val r = BubbleDetector.BUBBLE_DIAMETER / 2f
 
-        val greenFill = android.graphics.Color.argb(100, 76, 175, 80)
-        val greenRing = android.graphics.Color.argb(210, 76, 175, 80)
+        val greenFill = android.graphics.Color.argb(120, 76, 175, 80)
+        val greenRing = android.graphics.Color.argb(230, 76, 175, 80)
 
-        val redFill = android.graphics.Color.argb(100, 244, 67, 54)
-        val redRing = android.graphics.Color.argb(210, 244, 67, 54)
+        val redFill = android.graphics.Color.argb(120, 244, 67, 54)
+        val redRing = android.graphics.Color.argb(230, 244, 67, 54)
+
+        // Green outline for showing correct answer when student got it wrong
+        val correctHintRing = android.graphics.Color.argb(180, 76, 175, 80)
 
         for (qResult in questionResults) {
-            if (qResult.detectedAnswer.isBlank()) continue
-
             val qBubbles = bubbles.filter { it.questionIndex == qResult.questionIndex }
 
-            for (bubble in qBubbles) {
-                val label = optionLabels.getOrElse(bubble.optionIndex) { "" }
-                if (qResult.detectedAnswer != label) continue
+            // Draw the student's detected answer (green if correct, red if wrong)
+            if (qResult.detectedAnswer.isNotBlank()) {
+                for (bubble in qBubbles) {
+                    val label = optionLabels.getOrElse(bubble.optionIndex) { "" }
+                    if (qResult.detectedAnswer != label) continue
 
-                val cx = bubble.centerX.toFloat()
-                val cy = bubble.centerY.toFloat()
-                val isCorrect = qResult.result == AnswerResult.CORRECT
+                    val cx = bubble.centerX.toFloat()
+                    val cy = bubble.centerY.toFloat()
+                    val isCorrect = qResult.result == AnswerResult.CORRECT
 
-                // Layer 1: semi-transparent fill
-                fillPaint.color = if (isCorrect) greenFill else redFill
-                canvas.drawCircle(cx, cy, r + 2f, fillPaint)
+                    // Layer 1: semi-transparent fill
+                    fillPaint.color = if (isCorrect) greenFill else redFill
+                    canvas.drawCircle(cx, cy, r + 2f, fillPaint)
 
-                // Layer 2: crisp ring stroke
-                ringPaint.color = if (isCorrect) greenRing else redRing
-                canvas.drawCircle(cx, cy, r, ringPaint)
+                    // Layer 2: crisp ring stroke
+                    ringPaint.color = if (isCorrect) greenRing else redRing
+                    ringPaint.strokeWidth = 3f
+                    canvas.drawCircle(cx, cy, r, ringPaint)
 
-                // Layer 3: letter label
-                canvas.drawText(label, cx, cy + textPaint.textSize / 3, textPaint)
+                    // Layer 3: letter label
+                    canvas.drawText(label, cx, cy + textPaint.textSize / 3, textPaint)
+                }
+            }
+
+            // If wrong, also highlight the correct answer with green outline
+            if (qResult.result == AnswerResult.WRONG && qResult.correctAnswer.isNotBlank()) {
+                val correctOptIdx = optionLabels.indexOf(qResult.correctAnswer)
+                if (correctOptIdx >= 0) {
+                    val correctBubble = qBubbles.find { it.optionIndex == correctOptIdx }
+                    if (correctBubble != null) {
+                        val cx = correctBubble.centerX.toFloat()
+                        val cy = correctBubble.centerY.toFloat()
+                        ringPaint.color = correctHintRing
+                        ringPaint.strokeWidth = 2f
+                        canvas.drawCircle(cx, cy, r + 1f, ringPaint)
+                    }
+                }
             }
         }
 
