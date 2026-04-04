@@ -1,0 +1,3 @@
+/Users/merenekiz/vscode/OptiScan/opencv/.cxx/Debug/6w6w33kz/armeabi-v7a/CMakeFiles/opencv_jni_shared.dir
+/Users/merenekiz/vscode/OptiScan/opencv/.cxx/Debug/6w6w33kz/armeabi-v7a/CMakeFiles/edit_cache.dir
+/Users/merenekiz/vscode/OptiScan/opencv/.cxx/Debug/6w6w33kz/armeabi-v7a/CMakeFiles/rebuild_cache.dir

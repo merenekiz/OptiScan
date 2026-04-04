@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OptiScan</string>
+    <string name="developer">merenekiz</string>
+    <string name="developer_label">Geliştiren: merenekiz</string>
+    <string name="scan_exam">Sınav Tara</string>
+    <string name="exams">Sınavlar</string>
+    <string name="results">Sonuçlar</string>
+    <string name="export">Dışa Aktar</string>
+    <string name="create_exam">Sınav Oluştur</string>
+    <string name="camera_permission_required">Kamera izni gereklidir</string>
+    <string name="storage_permission_required">Depolama izni gereklidir</string>
+    <string name="scan_complete">Tarama tamamlandı</string>
+    <string name="scan_failed">Tarama başarısız</string>
+    <string name="qr_detected">QR kodu okundu</string>
+    <string name="processing">İşleniyor...</string>
+    <string name="export_success">Excel dosyası oluşturuldu</string>
+    <string name="no_answer_key">Cevap anahtarı bulunamadı</string>
+    <string name="align_sheet">Formu çerçeve içine yerleştirin</string>
+    <string name="hold_steady">Sabit tutun...</string>
+</resources>
