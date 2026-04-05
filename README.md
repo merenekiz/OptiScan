@@ -1,38 +1,74 @@
 # OptiScan
 
+> **APK İndir:** [`app/build/outputs/apk/debug/app-debug.apk`](app/build/outputs/apk/debug/app-debug.apk)
+
 Android tabanlı OMR (Optik İşaret Tanıma) + OCR sınav okuyucu uygulaması. Basılı cevap kağıtlarını telefon kamerasıyla tarayın, doldurulmuş baloncukları otomatik algılayın, OCR ile öğrenci bilgilerini okuyun ve notlandırılmış sonuçları Excel olarak dışa aktarın.
 
 **Geliştiren:** merenekiz
 
-> **APK İndir:** [`app/build/outputs/apk/debug/app-debug.apk`](app/build/outputs/apk/debug/app-debug.apk)
+## Ne Yapıyor?
 
-## Özellikler
+Basılı optik cevap kağıtlarını telefon kamerasıyla tarayıp, otomatik olarak okuyan ve notlandıran Android uygulaması.
 
-- **OMR Baloncuk Algılama** — OpenCV adaptif eşikleme ile basılı cevap kağıtlarındaki doldurulmuş baloncukları algılar
-- **OCR Öğrenci Bilgisi** — ML Kit ile ad soyad, öğrenci no ve şube bilgilerini okur
-- **QR Kod Desteği** — Form üzerindeki QR kodu okuyarak sınav ayarlarını otomatik yapılandırır
-- **Otomatik Notlandırma** — Yapılandırılabilir doğru/yanlış puan değerleriyle not hesaplar
-- **PDF Form Oluşturucu** — Herhangi bir soru sayısı (1-100) için yazdırılabilir A4 optik form oluşturur
-- **Excel Dışa Aktarma** — Apache POI ile öğrenci bazlı sonuçları `.xlsx` olarak dışa aktarır
-- **Görsel Geri Bildirim** — Taranan formlarda renkli işaretleme (yeşil = doğru, kırmızı = yanlış)
-- **Tamamen Çevrimdışı** — Tüm işlemler cihaz üzerinde çalışır, internet gerekmez
-- **Dinamik Düzen** — Baloncuk ızgarası otomatik ölçeklenir: 1-30 soru tek sütun, 31+ çift sütun
+### Pipeline (İşlem Akışı)
 
-## Teknoloji
+```
+Kamera/Galeri → Perspektif Düzeltme → Baloncuk Algılama → OCR → Notlandırma → Sonuç
+```
 
-| Katman | Teknoloji |
-|--------|-----------|
-| Dil | Kotlin |
-| Arayüz | Jetpack Compose + Material3 |
-| Kamera | CameraX |
-| Görüntü İşleme | OpenCV 4.x (yerel modül) |
-| OCR | Google ML Kit Text Recognition (gömülü) |
-| QR Algılama | Google ML Kit Barcode Scanning (gömülü) |
-| Veritabanı | Room |
-| Bağımlılık Enjeksiyonu | Hilt |
-| Excel Dışa Aktarma | Apache POI 5.2.5 |
-| Min SDK | 26 (Android 8.0) |
-| Hedef SDK | 35 |
+## Aktif Teknolojiler ve Kullanım Amaçları
+
+| Teknoloji | Kullanım | Detay |
+|-----------|----------|-------|
+| **OpenCV 4.x** | Görüntü işleme | Perspektif düzeltme (warp), adaptif eşikleme (adaptive threshold), morfolojik işlemler (morphology). Kağıdı 800x1100px sabit boyuta dönüştürüyor |
+| **ML Kit Text Recognition** | OCR | Ad Soyad, Öğrenci No, Şube bilgilerini formun üst kısmından okuyor. Cihaz üzerinde (on-device) çalışır, internet gerektirmez |
+| **ML Kit Barcode Scanning** | QR Kod | Form üzerindeki QR kodu okuyarak sınav ayarlarını (soru sayısı, cevap anahtarı vb.) otomatik yapılandırıyor |
+| **CameraX** | Kamera yönetimi | Önizleme + fotoğraf çekimi. Android'in modern kamera API'si |
+| **Jetpack Compose + Material3** | Arayüz | Tamamen deklaratif UI, Material Design 3 teması |
+| **Room** | Veritabanı | Sınav tanımları ve öğrenci sonuçlarını SQLite'da saklar |
+| **Hilt (Dagger)** | Dependency Injection | Tüm bileşenler (processor, repository, viewmodel) otomatik enjekte edilir |
+| **Apache POI 5.2.5** | Excel dışa aktarma | Sonuçları `.xlsx` formatında çıktı verir |
+| **Android PDF API** | Form oluşturma | Yazdırılabilir A4 optik formları programatik olarak çiziyor |
+
+## Algoritmalar
+
+### 1. Perspektif Düzeltme (Warp)
+
+- 4 köşe alignment marker'ı (siyah kareler) tespit edilir
+- OpenCV `getPerspectiveTransform` + `warpPerspective` ile kağıt 800x1100px dikdörtgene dönüştürülür
+
+### 2. Baloncuk Algılama (OMR)
+
+- `adaptiveThreshold` (Gaussian, blockSize=15) ile binary görüntü elde edilir
+- `morphologyEx` (MORPH_OPEN, ellipse kernel 3x3) ile gürültü temizlenir
+- Her baloncuk pozisyonu grid layout'tan hesaplanır (sabit koordinat sistemi)
+- Dairesel mask ile `bitwise_and` → dolu piksel oranı hesaplanır
+- **Eşikler:** `≥0.40` = dolu (FILLED), `≥0.20` = belirsiz (AMBIGUOUS), `<0.20` = boş (EMPTY)
+- 1-30 soru: tek sütun, 31-100 soru: çift sütun (otomatik)
+
+### 3. OCR (Öğrenci Bilgisi)
+
+- Warped görüntüden sabit koordinatlara göre 3 bölge crop edilir (Ad Soyad, No, Şube)
+- ML Kit `TextRecognizer` ile metin çıkarılır
+- Regex ile label prefix'leri temizlenir ("Ad Soyad:", "Öğrenci No:", "Şube:" gibi)
+
+### 4. Notlandırma
+
+- Yapılandırılabilir: doğru puanı, yanlış cezası
+- `score = (doğru × doğruPuanı) - (yanlış × yanlışCezası)`
+- Görsel feedback: doğru=yeşil, yanlış=kırmızı işaretleme warped bitmap üzerinde
+
+## Mimari
+
+- **MVVM** pattern (ViewModel + StateFlow + Compose)
+- **Single Activity** + Compose Navigation
+- **Singleton** servisler: OcrProcessor, BubbleDetector, QrScanner (Hilt @Singleton)
+- **Repository** pattern: ExamRepository, StudentResultRepository
+- Tamamen **offline** — tüm ML modelleri cihaza gömülü (bundled)
+
+### Koordinat Sistemi
+
+Tüm bileşenler (PDF oluşturucu, baloncuk algılayıcı, OCR) aynı 800x1100px koordinat uzayını paylaşır. Bu sayede form oluşturma ile okuma birebir eşleşir.
 
 ## Proje Yapısı
 
@@ -60,6 +96,18 @@ app/src/main/java/com/optiscan/
 4. **İşle** — Pipeline çalışır: Perspektif Düzeltme → Baloncuk Algılama → OCR → Notlandırma
 5. **İncele** — Renkli sonuçları doğru/yanlış/boş dağılımıyla gör
 6. **Dışa Aktar** — Sonuçları Excel tablosu olarak indir
+
+## Özellikler
+
+- **OMR Baloncuk Algılama** — OpenCV adaptif eşikleme ile basılı cevap kağıtlarındaki doldurulmuş baloncukları algılar
+- **OCR Öğrenci Bilgisi** — ML Kit ile ad soyad, öğrenci no ve şube bilgilerini okur
+- **QR Kod Desteği** — Form üzerindeki QR kodu okuyarak sınav ayarlarını otomatik yapılandırır
+- **Otomatik Notlandırma** — Yapılandırılabilir doğru/yanlış puan değerleriyle not hesaplar
+- **PDF Form Oluşturucu** — Herhangi bir soru sayısı (1-100) için yazdırılabilir A4 optik form oluşturur
+- **Excel Dışa Aktarma** — Apache POI ile öğrenci bazlı sonuçları `.xlsx` olarak dışa aktarır
+- **Görsel Geri Bildirim** — Taranan formlarda renkli işaretleme (yeşil = doğru, kırmızı = yanlış)
+- **Tamamen Çevrimdışı** — Tüm işlemler cihaz üzerinde çalışır, internet gerekmez
+- **Dinamik Düzen** — Baloncuk ızgarası otomatik ölçeklenir: 1-30 soru tek sütun, 31+ çift sütun
 
 ## Kurulum (APK)
 
@@ -125,6 +173,19 @@ cd OptiScan
 
 OpenCV modülü `opencv/` dizininde yerel olarak dahildir — ek kurulum gerekmez.
 
+## OMR Algılama Parametreleri
+
+`BubbleDetector.kt` dosyasında bulunur:
+
+| Parametre | Değer | Açıklama |
+|-----------|-------|----------|
+| `SHEET_WIDTH` | 800px | Düzeltilmiş form genişliği |
+| `SHEET_HEIGHT` | 1100px | Düzeltilmiş form yüksekliği |
+| `GRID_START_Y` | 240px | Baloncuk ızgarası başlangıç Y koordinatı |
+| `BUBBLE_DIAMETER` | 22px | Algılama daire boyutu |
+| `FILL_THRESHOLD` | 0.40 | İşaretli sayılması için min doluluk % |
+| `AMBIGUOUS_THRESHOLD` | 0.20 | Belirsiz işaret için min doluluk % |
+
 ## İzinler
 
 | İzin | Kullanım Amacı |
@@ -141,19 +202,6 @@ OpenCV modülü `opencv/` dizininde yerel olarak dahildir — ek kurulum gerekme
 - **Doğru Puanı:** Otomatik hesaplanır (100 / soru sayısı)
 - **Yanlış Cezası:** Ayarlanabilir (0 = ceza yok)
 - **Cevap Anahtarı:** Görsel baloncuk seçici (her soru için A-E)
-
-### OMR Algılama Parametreleri
-
-`BubbleDetector.kt` dosyasında bulunur:
-
-| Parametre | Değer | Açıklama |
-|-----------|-------|----------|
-| `SHEET_WIDTH` | 800px | Düzeltilmiş form genişliği |
-| `SHEET_HEIGHT` | 1100px | Düzeltilmiş form yüksekliği |
-| `GRID_START_Y` | 240px | Baloncuk ızgarası başlangıç Y koordinatı |
-| `BUBBLE_DIAMETER` | 22px | Algılama daire boyutu |
-| `FILL_THRESHOLD` | 0.40 | İşaretli sayılması için min doluluk % |
-| `AMBIGUOUS_THRESHOLD` | 0.20 | Belirsiz işaret için min doluluk % |
 
 ## Lisans
 
