@@ -66,14 +66,8 @@ class PerspectiveTransformer @Inject constructor() {
                 warped.release()
                 TransformResult(bitmap, corners, true, 1f)
             } else {
-                // Fallback: assume full image is the sheet, resize to target
-                Log.w(TAG, "Sheet corners not detected, using resize fallback")
-                val resized = Mat()
-                Imgproc.resize(srcMat, resized, Size(OUTPUT_WIDTH.toDouble(), OUTPUT_HEIGHT.toDouble()))
-                Log.d(TAG, "Fallback output size: ${resized.cols()}x${resized.rows()}")
-                val bitmap = matToBitmap(resized)
-                resized.release()
-                TransformResult(bitmap, null, true, 0.5f)
+                Log.w(TAG, "Sheet corners not detected — form could not be found in image")
+                TransformResult(null, null, false)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Transform failed: ${e.message}", e)
@@ -170,9 +164,9 @@ class PerspectiveTransformer @Inject constructor() {
             hierarchy.release()
 
             val imageArea = imgW.toDouble() * imgH.toDouble()
-            // Marker should be roughly 1-4% of sheet side → area roughly 0.0001 to 0.005 of image
-            val minMarkerArea = imageArea * 0.0001
-            val maxMarkerArea = imageArea * 0.008
+            // Markers are 24x24px in 800x1100 form. In camera image they can be larger.
+            val minMarkerArea = imageArea * 0.00005
+            val maxMarkerArea = imageArea * 0.015
 
             data class MarkerCenter(val cx: Double, val cy: Double)
 

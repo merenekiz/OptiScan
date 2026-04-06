@@ -377,8 +377,8 @@ private fun GalleryOnlyScreen(
 @Composable
 private fun ScanGuideOverlay() {
     val frameColor = Color(0xFF00E5FF)
-    val cornerLen = 36.dp
-    val strokeW = 3.dp
+    val cornerLen = 48.dp
+    val strokeW = 4.dp
 
     Box(modifier = Modifier.fillMaxSize()) {
         // A4 ratio frame centered — fills most of the screen width with padding
