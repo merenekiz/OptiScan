@@ -164,6 +164,9 @@ fun CameraScreen(
                             previewView = previewView,
                             onQrDetected = { metadata ->
                                 viewModel.onQrDetected(metadata)
+                            },
+                            onSheetDetected = {
+                                viewModel.onSheetDetected()
                             }
                         )
                     }
@@ -180,7 +183,7 @@ fun CameraScreen(
 
                 is ScanPhase.QrScanning -> {
                     ScanStatusBanner(
-                        message = "QR kodu aramak için kamerayı sınav formuna çevirin",
+                        message = "Formu çerçeveye yerleştirin — otomatik taranacak",
                         color = Color(0xCC000000)
                     )
                 }
@@ -373,52 +376,41 @@ private fun GalleryOnlyScreen(
 
 @Composable
 private fun ScanGuideOverlay() {
-    val markerColor = Color(0xFF00E5FF)
-    val cornerLen = 28.dp
+    val frameColor = Color(0xFF00E5FF)
+    val cornerLen = 36.dp
     val strokeW = 3.dp
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // A4 ratio rectangle centered on screen (800:1100 ≈ 0.727)
+        // A4 ratio frame centered — fills most of the screen width with padding
         val sheetRatio = 800f / 1100f
         Box(
             modifier = Modifier
-                .fillMaxHeight(0.80f)
+                .fillMaxWidth(0.88f)
                 .aspectRatio(sheetRatio)
                 .align(Alignment.Center)
+                .border(width = 1.dp, color = frameColor.copy(alpha = 0.3f), shape = RoundedCornerShape(4.dp))
         ) {
-            // Top-left corner
-            Box(
-                Modifier.align(Alignment.TopStart)
-                    .size(cornerLen)
-                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(topStart = 6.dp))
-            )
-            // Top-right corner
-            Box(
-                Modifier.align(Alignment.TopEnd)
-                    .size(cornerLen)
-                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(topEnd = 6.dp))
-            )
-            // Bottom-left corner
-            Box(
-                Modifier.align(Alignment.BottomStart)
-                    .size(cornerLen)
-                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(bottomStart = 6.dp))
-            )
-            // Bottom-right corner
-            Box(
-                Modifier.align(Alignment.BottomEnd)
-                    .size(cornerLen)
-                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(bottomEnd = 6.dp))
-            )
+            // Top-left
+            Box(Modifier.align(Alignment.TopStart).size(cornerLen)
+                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(topStart = 8.dp)))
+            // Top-right
+            Box(Modifier.align(Alignment.TopEnd).size(cornerLen)
+                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(topEnd = 8.dp)))
+            // Bottom-left
+            Box(Modifier.align(Alignment.BottomStart).size(cornerLen)
+                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(bottomStart = 8.dp)))
+            // Bottom-right
+            Box(Modifier.align(Alignment.BottomEnd).size(cornerLen)
+                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(bottomEnd = 8.dp)))
         }
 
         Text(
-            "Formu çerçeve içine yerleştirin",
+            "Formu çerçeveye yerleştirin — otomatik taranacak",
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 120.dp)
-                .background(Color.Black.copy(0.5f), RoundedCornerShape(8.dp))
-                .padding(8.dp),
+                .padding(bottom = 110.dp)
+                .background(Color.Black.copy(0.6f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             color = Color.White,
             fontSize = 12.sp
         )

@@ -77,15 +77,10 @@ class CameraViewModel @Inject constructor(
     fun onQrDetected(metadata: ExamMetadata) {
         viewModelScope.launch {
             _uiState.update { it.copy(phase = ScanPhase.QrDetected(metadata)) }
-            // Switch from QR scanning to sheet detection — auto-capture when paper is aligned
-            cameraManager.switchToSheetDetection {
-                onSheetDetected()
-            }
         }
     }
 
-    private fun onSheetDetected() {
-        // Auto-trigger capture when sheet is stably detected
+    fun onSheetDetected() {
         viewModelScope.launch {
             val current = _uiState.value.phase
             if (current is ScanPhase.QrDetected || current is ScanPhase.QrScanning || current is ScanPhase.Idle) {
@@ -113,6 +108,7 @@ class CameraViewModel @Inject constructor(
                 val bitmap = cameraManager.captureImage(context)
                 if (bitmap == null) {
                     _uiState.update { it.copy(phase = ScanPhase.Error("Kamera görüntüsü alınamadı")) }
+                    cameraManager.resetSheetDetector()
                     return@launch
                 }
 
@@ -125,6 +121,7 @@ class CameraViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(phase = ScanPhase.Error(omrResult.errorMessage ?: "OMR başarısız"))
                     }
+                    cameraManager.resetSheetDetector()
                     return@launch
                 }
 
@@ -167,6 +164,7 @@ class CameraViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(phase = ScanPhase.Error("Tarama hatası: ${e.message ?: "Bilinmeyen"}"))
                 }
+                cameraManager.resetSheetDetector()
             }
         }
     }
@@ -291,7 +289,7 @@ class CameraViewModel @Inject constructor(
 
     fun resetForNextScan() {
         _uiState.update { it.copy(phase = ScanPhase.QrScanning, previewBitmap = null) }
-        cameraManager.enableQrScan()
+        cameraManager.resetSheetDetector()
     }
 
     override fun onCleared() {

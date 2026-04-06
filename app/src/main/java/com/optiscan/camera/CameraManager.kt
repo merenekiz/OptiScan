@@ -44,12 +44,18 @@ class CameraManager @Inject constructor() {
         context: Context,
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
-        onQrDetected: ((ExamMetadata) -> Unit)? = null
+        onQrDetected: ((ExamMetadata) -> Unit)? = null,
+        onSheetDetected: (() -> Unit)? = null
     ) {
         if (isBound) return
 
         if (cameraExecutor.isShutdown) {
             cameraExecutor = Executors.newSingleThreadExecutor()
+        }
+
+        // Prepare sheet detector early so it's ready when camera binds
+        if (onSheetDetected != null) {
+            sheetDetector = SheetDetectorAnalyzer(onSheetDetected)
         }
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
@@ -79,24 +85,28 @@ class CameraManager @Inject constructor() {
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-        // Use JPEG output for reliable decoding
         imageCapture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setTargetAspectRatio(AspectRatio.RATIO_16_9)
             .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
             .build()
 
-        val useCases = mutableListOf<UseCase>(preview, imageCapture!!)
+        // Always create ImageAnalysis — start with sheet detector if available
+        imageAnalysis = ImageAnalysis.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
 
-        if (onQrDetected != null) {
+        // Set sheet detector as the analyzer — it starts detecting immediately
+        if (sheetDetector != null) {
+            imageAnalysis!!.setAnalyzer(cameraExecutor, sheetDetector!!)
+            Log.d(TAG, "Sheet detector set as initial analyzer")
+        } else if (onQrDetected != null) {
             barcodeAnalyzer = BarcodeAnalyzer(onQrDetected)
-            imageAnalysis = ImageAnalysis.Builder()
-                .setTargetAspectRatio(AspectRatio.RATIO_16_9)
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also { it.setAnalyzer(cameraExecutor, barcodeAnalyzer!!) }
-            useCases.add(imageAnalysis!!)
+            imageAnalysis!!.setAnalyzer(cameraExecutor, barcodeAnalyzer!!)
         }
+
+        val useCases = listOf<UseCase>(preview, imageCapture!!, imageAnalysis!!)
 
         try {
             provider.unbindAll()
@@ -204,25 +214,6 @@ class CameraManager @Inject constructor() {
         val rotated = Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
         if (rotated != this) recycle()
         return rotated
-    }
-
-    fun enableQrScan() {
-        barcodeAnalyzer?.reset()
-        barcodeAnalyzer?.let { imageAnalysis?.setAnalyzer(cameraExecutor, it) }
-    }
-
-    fun disableQrScan() {
-        imageAnalysis?.clearAnalyzer()
-    }
-
-    /**
-     * Switch the image analysis pipeline from QR scanning to sheet detection.
-     * Called after QR is detected — now we watch for the paper to be aligned.
-     */
-    fun switchToSheetDetection(onSheetDetected: () -> Unit) {
-        sheetDetector = SheetDetectorAnalyzer(onSheetDetected)
-        imageAnalysis?.setAnalyzer(cameraExecutor, sheetDetector!!)
-        Log.d(TAG, "Switched to sheet detection mode")
     }
 
     fun resetSheetDetector() {
