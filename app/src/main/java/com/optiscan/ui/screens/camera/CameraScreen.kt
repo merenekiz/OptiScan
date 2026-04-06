@@ -88,6 +88,13 @@ fun CameraScreen(
         }
     }
 
+    // Auto-capture when sheet is detected
+    LaunchedEffect(Unit) {
+        viewModel.sheetDetectedEvent.collect {
+            viewModel.captureAndProcess(context)
+        }
+    }
+
     // On emulator or when camera is unavailable, show gallery-only mode
     val hasCamera = remember {
         context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY)
@@ -180,7 +187,7 @@ fun CameraScreen(
 
                 is ScanPhase.QrDetected -> {
                     ScanStatusBanner(
-                        message = "QR okundu: ${phase.metadata.examId} | ${phase.metadata.questionCount} soru",
+                        message = "QR okundu — formu çerçeveye yerleştirin, otomatik taranacak",
                         color = CorrectGreen.copy(alpha = 0.9f),
                         icon = Icons.Default.CheckCircle
                     )
@@ -210,9 +217,9 @@ fun CameraScreen(
                 }
             }
 
-            // Capture button — only show when actively scanning, not during overlays
-            val showCapture = uiState.phase is ScanPhase.QrScanning ||
-                    uiState.phase is ScanPhase.QrDetected ||
+            // Manual capture button as fallback
+            val showCapture = uiState.phase is ScanPhase.QrDetected ||
+                    uiState.phase is ScanPhase.QrScanning ||
                     uiState.phase is ScanPhase.Idle
             if (showCapture && uiState.currentExam != null) {
                 Box(
@@ -366,25 +373,44 @@ private fun GalleryOnlyScreen(
 
 @Composable
 private fun ScanGuideOverlay() {
-    Box(modifier = Modifier.fillMaxSize()) {
-        // Corner markers
-        val markerColor = Color(0xFF00E5FF)
-        val markerSize = 32.dp
-        val markerStroke = 4.dp
-        val margin = 40.dp
+    val markerColor = Color(0xFF00E5FF)
+    val cornerLen = 28.dp
+    val strokeW = 3.dp
 
-        // Top-left
-        Box(Modifier.padding(margin).size(markerSize).align(Alignment.TopStart)
-            .border(width = markerStroke, color = markerColor, shape = RoundedCornerShape(topStart = 8.dp)))
-        // Top-right
-        Box(Modifier.padding(margin).size(markerSize).align(Alignment.TopEnd)
-            .border(width = markerStroke, color = markerColor, shape = RoundedCornerShape(topEnd = 8.dp)))
-        // Bottom-left
-        Box(Modifier.padding(margin).size(markerSize).align(Alignment.BottomStart)
-            .border(width = markerStroke, color = markerColor, shape = RoundedCornerShape(bottomStart = 8.dp)))
-        // Bottom-right
-        Box(Modifier.padding(margin).size(markerSize).align(Alignment.BottomEnd)
-            .border(width = markerStroke, color = markerColor, shape = RoundedCornerShape(bottomEnd = 8.dp)))
+    Box(modifier = Modifier.fillMaxSize()) {
+        // A4 ratio rectangle centered on screen (800:1100 ≈ 0.727)
+        val sheetRatio = 800f / 1100f
+        Box(
+            modifier = Modifier
+                .fillMaxHeight(0.80f)
+                .aspectRatio(sheetRatio)
+                .align(Alignment.Center)
+        ) {
+            // Top-left corner
+            Box(
+                Modifier.align(Alignment.TopStart)
+                    .size(cornerLen)
+                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(topStart = 6.dp))
+            )
+            // Top-right corner
+            Box(
+                Modifier.align(Alignment.TopEnd)
+                    .size(cornerLen)
+                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(topEnd = 6.dp))
+            )
+            // Bottom-left corner
+            Box(
+                Modifier.align(Alignment.BottomStart)
+                    .size(cornerLen)
+                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(bottomStart = 6.dp))
+            )
+            // Bottom-right corner
+            Box(
+                Modifier.align(Alignment.BottomEnd)
+                    .size(cornerLen)
+                    .border(width = strokeW, color = markerColor, shape = RoundedCornerShape(bottomEnd = 6.dp))
+            )
+        }
 
         Text(
             "Formu çerçeve içine yerleştirin",

@@ -13,6 +13,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.optiscan.processing.SheetDetectorAnalyzer
 import com.optiscan.qr.BarcodeAnalyzer
 import com.optiscan.qr.models.ExamMetadata
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -36,6 +37,7 @@ class CameraManager @Inject constructor() {
     private var imageAnalysis: ImageAnalysis? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var barcodeAnalyzer: BarcodeAnalyzer? = null
+    private var sheetDetector: SheetDetectorAnalyzer? = null
     private var isBound = false
 
     fun startCamera(
@@ -206,10 +208,29 @@ class CameraManager @Inject constructor() {
 
     fun enableQrScan() {
         barcodeAnalyzer?.reset()
+        barcodeAnalyzer?.let { imageAnalysis?.setAnalyzer(cameraExecutor, it) }
     }
 
     fun disableQrScan() {
         imageAnalysis?.clearAnalyzer()
+    }
+
+    /**
+     * Switch the image analysis pipeline from QR scanning to sheet detection.
+     * Called after QR is detected — now we watch for the paper to be aligned.
+     */
+    fun switchToSheetDetection(onSheetDetected: () -> Unit) {
+        sheetDetector = SheetDetectorAnalyzer(onSheetDetected)
+        imageAnalysis?.setAnalyzer(cameraExecutor, sheetDetector!!)
+        Log.d(TAG, "Switched to sheet detection mode")
+    }
+
+    fun resetSheetDetector() {
+        sheetDetector?.reset()
+    }
+
+    fun disableSheetDetection() {
+        sheetDetector?.disable()
     }
 
     fun shutdown() {

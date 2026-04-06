@@ -24,7 +24,7 @@ class PerspectiveTransformer @Inject constructor() {
         private const val TAG = "PerspectiveTransformer"
         private const val OUTPUT_WIDTH = 800
         private const val OUTPUT_HEIGHT = 1100
-        private const val MIN_AREA_RATIO = 0.1      // sheet must cover ≥10% of image
+        private const val MIN_AREA_RATIO = 0.03      // supports scaled-down printed sheets
         private const val MAX_AREA_RATIO = 0.95
     }
 
@@ -44,10 +44,12 @@ class PerspectiveTransformer @Inject constructor() {
 
             // If image is already close to target dimensions, just resize directly
             // (test forms from gallery are already 800x1100 or very close ratio)
+            // Skip ratio shortcut for camera images — always try corner detection first
+            // Only use direct resize for exact-match gallery images (test forms)
             val ratio = srcMat.cols().toFloat() / srcMat.rows().toFloat()
             val targetRatio = OUTPUT_WIDTH.toFloat() / OUTPUT_HEIGHT.toFloat()
-            if (kotlin.math.abs(ratio - targetRatio) < 0.05f) {
-                Log.d(TAG, "Image ratio matches target (${ratio} vs ${targetRatio}), resizing directly")
+            if (kotlin.math.abs(ratio - targetRatio) < 0.02f) {
+                Log.d(TAG, "Image ratio matches target exactly (${ratio} vs ${targetRatio}), resizing directly")
                 val resized = Mat()
                 Imgproc.resize(srcMat, resized, Size(OUTPUT_WIDTH.toDouble(), OUTPUT_HEIGHT.toDouble()))
                 val bitmap = matToBitmap(resized)
@@ -87,56 +89,59 @@ class PerspectiveTransformer @Inject constructor() {
         val edges = Mat()
 
         try {
-            // Convert to grayscale (Utils.bitmapToMat produces RGBA, not BGR)
             Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGBA2GRAY)
-
-            // Gaussian blur to reduce noise
             Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
 
-            // Adaptive Canny — auto-compute thresholds from median intensity
-            val median = computeMedian(blurred)
-            val lower = max(0.0, 0.67 * median)
-            val upper = min(255.0, 1.33 * median)
-            Imgproc.Canny(blurred, edges, lower, upper)
-
-            // Dilate edges to close gaps
-            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
-            Imgproc.dilate(edges, edges, kernel)
-            kernel.release()
-
-            // Find contours
-            val contours = mutableListOf<MatOfPoint>()
-            val hierarchy = Mat()
-            Imgproc.findContours(
-                edges, contours, hierarchy,
-                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
-            )
-            hierarchy.release()
-
-            val imageArea = src.rows().toDouble() * src.cols().toDouble()
-
-            // Find the largest quadrilateral contour
-            val sortedContours = contours.sortedByDescending { Imgproc.contourArea(it) }
-
-            for (contour in sortedContours) {
-                val area = Imgproc.contourArea(contour)
-                if (area < imageArea * MIN_AREA_RATIO) break
-                if (area > imageArea * MAX_AREA_RATIO) continue
-
-                val peri = Imgproc.arcLength(MatOfPoint2f(*contour.toArray()), true)
-                val approx = MatOfPoint2f()
-                Imgproc.approxPolyDP(MatOfPoint2f(*contour.toArray()), approx, 0.02 * peri, true)
-
-                if (approx.rows() == 4) {
-                    val pts = approx.toArray()
-                    val ordered = orderPoints(pts)
-                    approx.release()
-                    contours.forEach { it.release() }
-                    return ordered
-                }
-                approx.release()
+            // --- Strategy 1: find alignment markers (small filled black squares) ---
+            val markerCorners = detectAlignmentMarkers(gray, src.cols(), src.rows())
+            if (markerCorners != null) {
+                Log.d(TAG, "Found corners via alignment markers")
+                return markerCorners
             }
-            contours.forEach { it.release() }
+
+            // --- Strategy 2: contour-based detection with multiple Canny thresholds ---
+            val thresholds = listOf(0.5, 0.67, 0.33)
+            for (factor in thresholds) {
+                val median = computeMedian(blurred)
+                val lower = max(0.0, factor * median)
+                val upper = min(255.0, (2.0 - factor) * median)
+                Imgproc.Canny(blurred, edges, lower, upper)
+
+                val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
+                Imgproc.dilate(edges, edges, kernel)
+                kernel.release()
+
+                val contours = mutableListOf<MatOfPoint>()
+                val hierarchy = Mat()
+                Imgproc.findContours(
+                    edges, contours, hierarchy,
+                    Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
+                )
+                hierarchy.release()
+
+                val imageArea = src.rows().toDouble() * src.cols().toDouble()
+                val sortedContours = contours.sortedByDescending { Imgproc.contourArea(it) }
+
+                for (contour in sortedContours) {
+                    val area = Imgproc.contourArea(contour)
+                    if (area < imageArea * MIN_AREA_RATIO) break
+                    if (area > imageArea * MAX_AREA_RATIO) continue
+
+                    val peri = Imgproc.arcLength(MatOfPoint2f(*contour.toArray()), true)
+                    val approx = MatOfPoint2f()
+                    Imgproc.approxPolyDP(MatOfPoint2f(*contour.toArray()), approx, 0.02 * peri, true)
+
+                    if (approx.rows() == 4) {
+                        val pts = approx.toArray()
+                        val ordered = orderPoints(pts)
+                        approx.release()
+                        contours.forEach { it.release() }
+                        return ordered
+                    }
+                    approx.release()
+                }
+                contours.forEach { it.release() }
+            }
             return null
 
         } finally {
@@ -144,6 +149,98 @@ class PerspectiveTransformer @Inject constructor() {
             blurred.release()
             edges.release()
         }
+    }
+
+    /**
+     * Detects the 4 alignment marker squares drawn in form corners.
+     * Uses adaptive threshold + contour search for small filled squares.
+     */
+    private fun detectAlignmentMarkers(gray: Mat, imgW: Int, imgH: Int): Array<Point>? {
+        val thresh = Mat()
+        try {
+            Imgproc.adaptiveThreshold(
+                gray, thresh, 255.0,
+                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV,
+                31, 12.0
+            )
+
+            val contours = mutableListOf<MatOfPoint>()
+            val hierarchy = Mat()
+            Imgproc.findContours(thresh, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
+            hierarchy.release()
+
+            val imageArea = imgW.toDouble() * imgH.toDouble()
+            // Marker should be roughly 1-4% of sheet side → area roughly 0.0001 to 0.005 of image
+            val minMarkerArea = imageArea * 0.0001
+            val maxMarkerArea = imageArea * 0.008
+
+            data class MarkerCenter(val cx: Double, val cy: Double)
+
+            val candidates = mutableListOf<MarkerCenter>()
+            for (contour in contours) {
+                val area = Imgproc.contourArea(contour)
+                if (area < minMarkerArea || area > maxMarkerArea) continue
+
+                val rect = Imgproc.boundingRect(contour)
+                val aspectRatio = rect.width.toDouble() / rect.height.toDouble()
+                // Must be roughly square
+                if (aspectRatio < 0.5 || aspectRatio > 2.0) continue
+
+                // Must be mostly filled (solidity check)
+                val hull = MatOfInt()
+                Imgproc.convexHull(contour, hull)
+                val hullPoints = hull.toArray().map { contour.toArray()[it] }
+                if (hullPoints.size >= 3) {
+                    val hullMat = MatOfPoint(*hullPoints.toTypedArray())
+                    val hullArea = Imgproc.contourArea(hullMat)
+                    val solidity = area / hullArea
+                    hullMat.release()
+                    if (solidity < 0.8) { hull.release(); continue }
+                }
+                hull.release()
+
+                candidates.add(MarkerCenter(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0))
+            }
+            contours.forEach { it.release() }
+
+            if (candidates.size < 4) return null
+
+            // Pick the 4 candidates closest to image corners
+            val corners = arrayOf(
+                Point(0.0, 0.0),                    // TL
+                Point(imgW.toDouble(), 0.0),         // TR
+                Point(imgW.toDouble(), imgH.toDouble()), // BR
+                Point(0.0, imgH.toDouble())          // BL
+            )
+
+            val found = Array(4) { idx ->
+                val target = corners[idx]
+                val best = candidates.minByOrNull { distance(Point(it.cx, it.cy), target) }
+                    ?: return null
+                Point(best.cx, best.cy)
+            }
+
+            // Sanity check: the found points should form a reasonable quadrilateral
+            val quadArea = quadrilateralArea(found)
+            if (quadArea < imageArea * 0.08 || quadArea > imageArea * 0.98) return null
+
+            return found // already ordered TL, TR, BR, BL
+
+        } finally {
+            thresh.release()
+        }
+    }
+
+    private fun quadrilateralArea(pts: Array<Point>): Double {
+        // Shoelace formula
+        val n = pts.size
+        var area = 0.0
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            area += pts[i].x * pts[j].y
+            area -= pts[j].x * pts[i].y
+        }
+        return kotlin.math.abs(area) / 2.0
     }
 
     /**

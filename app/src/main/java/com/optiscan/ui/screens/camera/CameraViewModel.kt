@@ -18,7 +18,13 @@ import com.optiscan.processing.OmrProcessor
 import com.optiscan.qr.QrScanner
 import com.optiscan.qr.models.ExamMetadata
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -71,11 +77,34 @@ class CameraViewModel @Inject constructor(
     fun onQrDetected(metadata: ExamMetadata) {
         viewModelScope.launch {
             _uiState.update { it.copy(phase = ScanPhase.QrDetected(metadata)) }
+            // Switch from QR scanning to sheet detection — auto-capture when paper is aligned
+            cameraManager.switchToSheetDetection {
+                onSheetDetected()
+            }
         }
     }
 
+    private fun onSheetDetected() {
+        // Auto-trigger capture when sheet is stably detected
+        viewModelScope.launch {
+            val current = _uiState.value.phase
+            if (current is ScanPhase.QrDetected || current is ScanPhase.QrScanning || current is ScanPhase.Idle) {
+                _sheetDetectedEvent.emit(Unit)
+            }
+        }
+    }
+
+    // Exposed as flow so CameraScreen can collect and call captureAndProcess with context
+    private val _sheetDetectedEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val sheetDetectedEvent: SharedFlow<Unit> = _sheetDetectedEvent.asSharedFlow()
+
     fun captureAndProcess(context: Context) {
         val exam = _uiState.value.currentExam ?: return
+        // Prevent re-trigger while already processing
+        val phase = _uiState.value.phase
+        if (phase is ScanPhase.Capturing || phase is ScanPhase.Processing || phase is ScanPhase.Done) return
+
+        cameraManager.disableSheetDetection()
 
         viewModelScope.launch {
             try {
@@ -262,6 +291,7 @@ class CameraViewModel @Inject constructor(
 
     fun resetForNextScan() {
         _uiState.update { it.copy(phase = ScanPhase.QrScanning, previewBitmap = null) }
+        cameraManager.enableQrScan()
     }
 
     override fun onCleared() {
