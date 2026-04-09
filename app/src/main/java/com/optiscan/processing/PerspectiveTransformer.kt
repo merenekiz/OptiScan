@@ -7,6 +7,7 @@ import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -14,8 +15,9 @@ import kotlin.math.sqrt
 
 /**
  * Detects the answer sheet in an image and applies perspective correction.
- * Uses edge detection + contour finding to locate the four sheet corners,
- * then warpPerspective to produce a flat top-down view.
+ * Primary strategy: find 4 black alignment markers in the form corners.
+ * Fallback: edge detection + contour finding for the sheet outline.
+ * Then warpPerspective to produce a flat 800×1100 top-down view.
  */
 @Singleton
 class PerspectiveTransformer @Inject constructor() {
@@ -24,7 +26,7 @@ class PerspectiveTransformer @Inject constructor() {
         private const val TAG = "PerspectiveTransformer"
         private const val OUTPUT_WIDTH = 800
         private const val OUTPUT_HEIGHT = 1100
-        private const val MIN_AREA_RATIO = 0.03      // supports scaled-down printed sheets
+        private const val MIN_AREA_RATIO = 0.03
         private const val MAX_AREA_RATIO = 0.95
     }
 
@@ -42,14 +44,11 @@ class PerspectiveTransformer @Inject constructor() {
         return try {
             Log.d(TAG, "Input image size: ${srcMat.cols()}x${srcMat.rows()}")
 
-            // If image is already close to target dimensions, just resize directly
-            // (test forms from gallery are already 800x1100 or very close ratio)
-            // Skip ratio shortcut for camera images — always try corner detection first
-            // Only use direct resize for exact-match gallery images (test forms)
+            // If image is already exact target dimensions (test form from gallery)
             val ratio = srcMat.cols().toFloat() / srcMat.rows().toFloat()
             val targetRatio = OUTPUT_WIDTH.toFloat() / OUTPUT_HEIGHT.toFloat()
-            if (kotlin.math.abs(ratio - targetRatio) < 0.02f) {
-                Log.d(TAG, "Image ratio matches target exactly (${ratio} vs ${targetRatio}), resizing directly")
+            if (abs(ratio - targetRatio) < 0.02f) {
+                Log.d(TAG, "Image ratio matches target exactly, resizing directly")
                 val resized = Mat()
                 Imgproc.resize(srcMat, resized, Size(OUTPUT_WIDTH.toDouble(), OUTPUT_HEIGHT.toDouble()))
                 val bitmap = matToBitmap(resized)
@@ -57,18 +56,44 @@ class PerspectiveTransformer @Inject constructor() {
                 return TransformResult(bitmap, null, true, 0.9f)
             }
 
-            val corners = detectSheetCorners(srcMat)
-            if (corners != null) {
-                Log.d(TAG, "Corners detected: TL=${corners[0]}, TR=${corners[1]}, BR=${corners[2]}, BL=${corners[3]}")
-                val warped = applyWarp(srcMat, corners)
-                Log.d(TAG, "Warped output size: ${warped.cols()}x${warped.rows()}")
+            // Enhance contrast for better marker detection on camera photos
+            val enhanced = enhanceContrast(srcMat)
+
+            // Strategy 1: Find alignment markers (highest priority, most reliable)
+            val gray = Mat()
+            Imgproc.cvtColor(enhanced, gray, Imgproc.COLOR_RGBA2GRAY)
+
+            val markerCorners = detectAlignmentMarkersMultiStrategy(gray, srcMat.cols(), srcMat.rows())
+            if (markerCorners != null) {
+                Log.d(TAG, "Found corners via alignment markers")
+                gray.release()
+                enhanced.release()
+                val warped = applyWarp(srcMat, markerCorners)
                 val bitmap = matToBitmap(warped)
                 warped.release()
-                TransformResult(bitmap, corners, true, 1f)
-            } else {
-                Log.w(TAG, "Sheet corners not detected — form could not be found in image")
-                TransformResult(null, null, false)
+                return TransformResult(bitmap, markerCorners, true, 1f)
             }
+
+            // Strategy 2: Contour-based detection with multiple thresholds
+            val blurred = Mat()
+            Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
+
+            val contourCorners = detectViaContours(blurred, srcMat.cols(), srcMat.rows())
+            gray.release()
+            blurred.release()
+            enhanced.release()
+
+            if (contourCorners != null) {
+                Log.d(TAG, "Found corners via contour detection")
+                val warped = applyWarp(srcMat, contourCorners)
+                val bitmap = matToBitmap(warped)
+                warped.release()
+                return TransformResult(bitmap, contourCorners, true, 0.8f)
+            }
+
+            Log.w(TAG, "Sheet corners not detected — form could not be found in image")
+            TransformResult(null, null, false)
+
         } catch (e: Exception) {
             Log.e(TAG, "Transform failed: ${e.message}", e)
             TransformResult(null, null, false)
@@ -77,23 +102,173 @@ class PerspectiveTransformer @Inject constructor() {
         }
     }
 
-    private fun detectSheetCorners(src: Mat): Array<Point>? {
-        val gray = Mat()
-        val blurred = Mat()
+    /**
+     * Apply CLAHE contrast enhancement to improve marker detection on camera photos.
+     */
+    private fun enhanceContrast(src: Mat): Mat {
+        val lab = Mat()
+        Imgproc.cvtColor(src, lab, Imgproc.COLOR_RGBA2RGB)
+        val labConverted = Mat()
+        Imgproc.cvtColor(lab, labConverted, Imgproc.COLOR_RGB2Lab)
+        lab.release()
+
+        val channels = mutableListOf<Mat>()
+        Core.split(labConverted, channels)
+
+        val clahe = Imgproc.createCLAHE(2.0, Size(8.0, 8.0))
+        clahe.apply(channels[0], channels[0])
+
+        Core.merge(channels, labConverted)
+        channels.forEach { it.release() }
+
+        val result = Mat()
+        Imgproc.cvtColor(labConverted, result, Imgproc.COLOR_Lab2RGB)
+        labConverted.release()
+
+        val rgba = Mat()
+        Imgproc.cvtColor(result, rgba, Imgproc.COLOR_RGB2RGBA)
+        result.release()
+        return rgba
+    }
+
+    /**
+     * Try multiple binarization strategies to find 4 alignment markers.
+     */
+    private fun detectAlignmentMarkersMultiStrategy(gray: Mat, imgW: Int, imgH: Int): Array<Point>? {
+        val imageArea = imgW.toDouble() * imgH.toDouble()
+        // Markers can range from tiny (gallery test forms) to large (camera close-up)
+        val minMarkerArea = imageArea * 0.00003
+        val maxMarkerArea = imageArea * 0.02
+
+        // Strategy 1: Otsu global threshold
+        val otsu = Mat()
+        Imgproc.threshold(gray, otsu, 0.0, 255.0,
+            Imgproc.THRESH_BINARY_INV or Imgproc.THRESH_OTSU)
+        val result1 = findMarkersInBinary(otsu, imgW, imgH, minMarkerArea, maxMarkerArea, imageArea)
+        otsu.release()
+        if (result1 != null) return result1
+
+        // Strategy 2: Adaptive threshold (block 31)
+        val adaptive1 = Mat()
+        Imgproc.adaptiveThreshold(gray, adaptive1, 255.0,
+            Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV,
+            31, 12.0)
+        val result2 = findMarkersInBinary(adaptive1, imgW, imgH, minMarkerArea, maxMarkerArea, imageArea)
+        adaptive1.release()
+        if (result2 != null) return result2
+
+        // Strategy 3: Adaptive threshold (block 51, higher C)
+        val adaptive2 = Mat()
+        Imgproc.adaptiveThreshold(gray, adaptive2, 255.0,
+            Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV,
+            51, 15.0)
+        val result3 = findMarkersInBinary(adaptive2, imgW, imgH, minMarkerArea, maxMarkerArea, imageArea)
+        adaptive2.release()
+        if (result3 != null) return result3
+
+        // Strategy 4: Fixed threshold for very high contrast prints
+        val fixed = Mat()
+        Imgproc.threshold(gray, fixed, 80.0, 255.0, Imgproc.THRESH_BINARY_INV)
+        val result4 = findMarkersInBinary(fixed, imgW, imgH, minMarkerArea, maxMarkerArea, imageArea)
+        fixed.release()
+        return result4
+    }
+
+    /**
+     * Find 4 filled square markers in a binary image.
+     */
+    private fun findMarkersInBinary(
+        binary: Mat, imgW: Int, imgH: Int,
+        minArea: Double, maxArea: Double, imageArea: Double
+    ): Array<Point>? {
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        Imgproc.findContours(binary, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
+        hierarchy.release()
+
+        data class MarkerCenter(val cx: Double, val cy: Double, val area: Double)
+        val candidates = mutableListOf<MarkerCenter>()
+
+        for (contour in contours) {
+            val area = Imgproc.contourArea(contour)
+            if (area < minArea || area > maxArea) continue
+
+            val rect = Imgproc.boundingRect(contour)
+            val aspect = rect.width.toDouble() / rect.height.toDouble()
+            if (aspect < 0.5 || aspect > 2.0) continue
+
+            // Solidity check
+            val hull = MatOfInt()
+            Imgproc.convexHull(contour, hull)
+            val hullIndices = hull.toArray()
+            val contourPts = contour.toArray()
+            if (hullIndices.size >= 3) {
+                val hullPoints = hullIndices.map { contourPts[it] }
+                val hullMat = MatOfPoint(*hullPoints.toTypedArray())
+                val hullArea = Imgproc.contourArea(hullMat)
+                val solidity = if (hullArea > 0) area / hullArea else 0.0
+                hullMat.release()
+                if (solidity < 0.75) { hull.release(); continue }
+            }
+            hull.release()
+
+            // Extent check — how much of bounding rect is filled
+            val extent = area / (rect.width.toDouble() * rect.height.toDouble())
+            if (extent < 0.6) continue
+
+            candidates.add(MarkerCenter(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0, area))
+        }
+        contours.forEach { it.release() }
+
+        if (candidates.size < 4) return null
+
+        // Pick the 4 candidates closest to image corners
+        val corners = arrayOf(
+            Point(0.0, 0.0),
+            Point(imgW.toDouble(), 0.0),
+            Point(imgW.toDouble(), imgH.toDouble()),
+            Point(0.0, imgH.toDouble())
+        )
+
+        val found = Array(4) { idx ->
+            val target = corners[idx]
+            candidates.minByOrNull { distance(Point(it.cx, it.cy), target) }
+                ?.let { Point(it.cx, it.cy) }
+                ?: return null
+        }
+
+        // Validate: quadrilateral area should be reasonable
+        val quadArea = quadrilateralArea(found)
+        if (quadArea < imageArea * 0.05 || quadArea > imageArea * 0.98) return null
+
+        // Validate: check that opposite sides are roughly parallel and angles ~90°
+        val d01 = distance(found[0], found[1])
+        val d12 = distance(found[1], found[2])
+        val d23 = distance(found[2], found[3])
+        val d30 = distance(found[3], found[0])
+
+        // Opposite sides should be similar length (within 40%)
+        if (d01 > 0 && d23 > 0) {
+            val sideRatio1 = min(d01, d23) / max(d01, d23)
+            if (sideRatio1 < 0.6) return null
+        }
+        if (d12 > 0 && d30 > 0) {
+            val sideRatio2 = min(d12, d30) / max(d12, d30)
+            if (sideRatio2 < 0.6) return null
+        }
+
+        return found // TL, TR, BR, BL
+    }
+
+    /**
+     * Fallback: contour-based detection with multiple Canny thresholds.
+     * Also applies morphological closing to connect broken edges.
+     */
+    private fun detectViaContours(blurred: Mat, imgW: Int, imgH: Int): Array<Point>? {
         val edges = Mat()
+        val imageArea = imgW.toDouble() * imgH.toDouble()
 
         try {
-            Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGBA2GRAY)
-            Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
-
-            // --- Strategy 1: find alignment markers (small filled black squares) ---
-            val markerCorners = detectAlignmentMarkers(gray, src.cols(), src.rows())
-            if (markerCorners != null) {
-                Log.d(TAG, "Found corners via alignment markers")
-                return markerCorners
-            }
-
-            // --- Strategy 2: contour-based detection with multiple Canny thresholds ---
             val thresholds = listOf(0.5, 0.67, 0.33)
             for (factor in thresholds) {
                 val median = computeMedian(blurred)
@@ -101,19 +276,17 @@ class PerspectiveTransformer @Inject constructor() {
                 val upper = min(255.0, (2.0 - factor) * median)
                 Imgproc.Canny(blurred, edges, lower, upper)
 
-                val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
+                // Morphological closing to connect broken edges
+                val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
+                Imgproc.morphologyEx(edges, edges, Imgproc.MORPH_CLOSE, kernel)
                 Imgproc.dilate(edges, edges, kernel)
                 kernel.release()
 
                 val contours = mutableListOf<MatOfPoint>()
                 val hierarchy = Mat()
-                Imgproc.findContours(
-                    edges, contours, hierarchy,
-                    Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
-                )
+                Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
                 hierarchy.release()
 
-                val imageArea = src.rows().toDouble() * src.cols().toDouble()
                 val sortedContours = contours.sortedByDescending { Imgproc.contourArea(it) }
 
                 for (contour in sortedContours) {
@@ -137,96 +310,12 @@ class PerspectiveTransformer @Inject constructor() {
                 contours.forEach { it.release() }
             }
             return null
-
         } finally {
-            gray.release()
-            blurred.release()
             edges.release()
         }
     }
 
-    /**
-     * Detects the 4 alignment marker squares drawn in form corners.
-     * Uses adaptive threshold + contour search for small filled squares.
-     */
-    private fun detectAlignmentMarkers(gray: Mat, imgW: Int, imgH: Int): Array<Point>? {
-        val thresh = Mat()
-        try {
-            Imgproc.adaptiveThreshold(
-                gray, thresh, 255.0,
-                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV,
-                31, 12.0
-            )
-
-            val contours = mutableListOf<MatOfPoint>()
-            val hierarchy = Mat()
-            Imgproc.findContours(thresh, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
-            hierarchy.release()
-
-            val imageArea = imgW.toDouble() * imgH.toDouble()
-            // Markers are 24x24px in 800x1100 form. In camera image they can be larger.
-            val minMarkerArea = imageArea * 0.00005
-            val maxMarkerArea = imageArea * 0.015
-
-            data class MarkerCenter(val cx: Double, val cy: Double)
-
-            val candidates = mutableListOf<MarkerCenter>()
-            for (contour in contours) {
-                val area = Imgproc.contourArea(contour)
-                if (area < minMarkerArea || area > maxMarkerArea) continue
-
-                val rect = Imgproc.boundingRect(contour)
-                val aspectRatio = rect.width.toDouble() / rect.height.toDouble()
-                // Must be roughly square
-                if (aspectRatio < 0.5 || aspectRatio > 2.0) continue
-
-                // Must be mostly filled (solidity check)
-                val hull = MatOfInt()
-                Imgproc.convexHull(contour, hull)
-                val hullPoints = hull.toArray().map { contour.toArray()[it] }
-                if (hullPoints.size >= 3) {
-                    val hullMat = MatOfPoint(*hullPoints.toTypedArray())
-                    val hullArea = Imgproc.contourArea(hullMat)
-                    val solidity = area / hullArea
-                    hullMat.release()
-                    if (solidity < 0.8) { hull.release(); continue }
-                }
-                hull.release()
-
-                candidates.add(MarkerCenter(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0))
-            }
-            contours.forEach { it.release() }
-
-            if (candidates.size < 4) return null
-
-            // Pick the 4 candidates closest to image corners
-            val corners = arrayOf(
-                Point(0.0, 0.0),                    // TL
-                Point(imgW.toDouble(), 0.0),         // TR
-                Point(imgW.toDouble(), imgH.toDouble()), // BR
-                Point(0.0, imgH.toDouble())          // BL
-            )
-
-            val found = Array(4) { idx ->
-                val target = corners[idx]
-                val best = candidates.minByOrNull { distance(Point(it.cx, it.cy), target) }
-                    ?: return null
-                Point(best.cx, best.cy)
-            }
-
-            // Sanity check: the found points should form a reasonable quadrilateral
-            val quadArea = quadrilateralArea(found)
-            if (quadArea < imageArea * 0.08 || quadArea > imageArea * 0.98) return null
-
-            return found // already ordered TL, TR, BR, BL
-
-        } finally {
-            thresh.release()
-        }
-    }
-
     private fun quadrilateralArea(pts: Array<Point>): Double {
-        // Shoelace formula
         val n = pts.size
         var area = 0.0
         for (i in 0 until n) {
@@ -234,15 +323,9 @@ class PerspectiveTransformer @Inject constructor() {
             area += pts[i].x * pts[j].y
             area -= pts[j].x * pts[i].y
         }
-        return kotlin.math.abs(area) / 2.0
+        return abs(area) / 2.0
     }
 
-    /**
-     * Orders corner points as [topLeft, topRight, bottomRight, bottomLeft]
-     * using the sum/difference method which is robust against rotation.
-     * topLeft has the smallest (x+y), bottomRight has the largest.
-     * topRight has the smallest (y-x), bottomLeft has the largest.
-     */
     private fun orderPoints(pts: Array<Point>): Array<Point> {
         val topLeft = pts.minByOrNull { it.x + it.y }!!
         val bottomRight = pts.maxByOrNull { it.x + it.y }!!
@@ -255,7 +338,6 @@ class PerspectiveTransformer @Inject constructor() {
         val tl = corners[0]; val tr = corners[1]
         val br = corners[2]; val bl = corners[3]
 
-        // Compute output dimensions based on detected rectangle
         val widthA = distance(br, bl)
         val widthB = distance(tr, tl)
         val maxWidth = max(widthA, widthB).toInt()
@@ -281,7 +363,6 @@ class PerspectiveTransformer @Inject constructor() {
 
         srcPts.release(); dstPts.release(); M.release()
 
-        // Resize to standard output for consistent bubble grid
         val resized = Mat()
         Imgproc.resize(warped, resized, Size(OUTPUT_WIDTH.toDouble(), OUTPUT_HEIGHT.toDouble()))
         warped.release()

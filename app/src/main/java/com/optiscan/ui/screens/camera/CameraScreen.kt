@@ -8,6 +8,8 @@ import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,6 +41,7 @@ import com.google.accompanist.permissions.rememberPermissionState
 import com.optiscan.ui.theme.CorrectGreen
 import com.optiscan.ui.theme.Primary
 import com.optiscan.ui.theme.WrongRed
+import kotlinx.coroutines.delay
 
 
 @OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
@@ -54,7 +57,6 @@ fun CameraScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
 
-    // Gallery picker — load bitmap from URI and process
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -95,13 +97,22 @@ fun CameraScreen(
         }
     }
 
-    // On emulator or when camera is unavailable, show gallery-only mode
+    // Poll detection progress for UI feedback
+    val isScanning = uiState.phase is ScanPhase.QrScanning ||
+            uiState.phase is ScanPhase.QrDetected ||
+            uiState.phase is ScanPhase.Idle
+    LaunchedEffect(isScanning) {
+        while (isScanning) {
+            viewModel.updateDetectionProgress()
+            delay(200)
+        }
+    }
+
     val hasCamera = remember {
         context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY)
     }
 
     if (!hasCamera || !cameraPermission.status.isGranted) {
-        // Gallery-only mode for emulator
         GalleryOnlyScreen(
             uiState = uiState,
             onBack = onBack,
@@ -128,7 +139,6 @@ fun CameraScreen(
                     IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Geri", tint = Color.White) }
                 },
                 actions = {
-                    // Gallery button
                     IconButton(onClick = { galleryLauncher.launch("image/*") }) {
                         Icon(Icons.Default.PhotoLibrary, "Galeriden Seç", tint = Color.White)
                     }
@@ -152,7 +162,6 @@ fun CameraScreen(
                 .background(Color.Black)
                 .padding(padding)
         ) {
-            // Camera preview — start camera only once in factory, not on every recomposition
             AndroidView(
                 factory = { ctx ->
                     PreviewView(ctx).apply {
@@ -174,8 +183,8 @@ fun CameraScreen(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Scan overlay frame
-            ScanGuideOverlay()
+            // Scan overlay frame with detection feedback
+            ScanGuideOverlay(detectionProgress = uiState.detectionProgress)
 
             // Phase-specific UI
             when (val phase = uiState.phase) {
@@ -240,10 +249,6 @@ fun CameraScreen(
     }
 }
 
-/**
- * Gallery-only mode — used on emulator or when camera permission is denied.
- * Shows a full-screen UI with a "Pick from Gallery" button.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun GalleryOnlyScreen(
@@ -294,7 +299,6 @@ private fun GalleryOnlyScreen(
                 is ScanPhase.Done -> ResultOverlay(phase = phase, onNext = onNext, onBack = onBack)
                 is ScanPhase.Error -> ErrorBanner(message = phase.message, onRetry = onNext)
                 else -> {
-                    // Main gallery picker UI
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -374,45 +378,95 @@ private fun GalleryOnlyScreen(
     }
 }
 
+/**
+ * Camera overlay with form guide frame and detection progress feedback.
+ * Corner markers grow larger and change color as detection progresses.
+ */
 @Composable
-private fun ScanGuideOverlay() {
-    val frameColor = Color(0xFF00E5FF)
-    val cornerLen = 48.dp
-    val strokeW = 4.dp
+private fun ScanGuideOverlay(detectionProgress: Int = 0) {
+    val baseColor = Color(0xFF00E5FF)
+    val detectedColor = CorrectGreen
+    val cornerLen = 64.dp
+    val strokeW = 5.dp
+
+    // Animate corner color based on detection progress (0=cyan, 3=green)
+    val progressFraction = (detectionProgress / 3f).coerceIn(0f, 1f)
+    val cornerColor by animateColorAsState(
+        targetValue = if (progressFraction > 0.3f) {
+            Color(
+                red = baseColor.red + (detectedColor.red - baseColor.red) * progressFraction,
+                green = baseColor.green + (detectedColor.green - baseColor.green) * progressFraction,
+                blue = baseColor.blue + (detectedColor.blue - baseColor.blue) * progressFraction,
+                alpha = 1f
+            )
+        } else baseColor,
+        animationSpec = tween(300),
+        label = "cornerColor"
+    )
+
+    // Pulse animation when detection is in progress
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseAlpha"
+    )
+
+    val frameAlpha = if (detectionProgress > 0) pulseAlpha else 0.3f
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // A4 ratio frame centered — fills most of the screen width with padding
         val sheetRatio = 800f / 1100f
         Box(
             modifier = Modifier
                 .fillMaxWidth(0.88f)
                 .aspectRatio(sheetRatio)
                 .align(Alignment.Center)
-                .border(width = 1.dp, color = frameColor.copy(alpha = 0.3f), shape = RoundedCornerShape(4.dp))
+                .border(
+                    width = if (detectionProgress > 0) 2.dp else 1.dp,
+                    color = cornerColor.copy(alpha = frameAlpha),
+                    shape = RoundedCornerShape(4.dp)
+                )
         ) {
             // Top-left
             Box(Modifier.align(Alignment.TopStart).size(cornerLen)
-                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(topStart = 8.dp)))
+                .border(width = strokeW, color = cornerColor, shape = RoundedCornerShape(topStart = 10.dp)))
             // Top-right
             Box(Modifier.align(Alignment.TopEnd).size(cornerLen)
-                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(topEnd = 8.dp)))
+                .border(width = strokeW, color = cornerColor, shape = RoundedCornerShape(topEnd = 10.dp)))
             // Bottom-left
             Box(Modifier.align(Alignment.BottomStart).size(cornerLen)
-                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(bottomStart = 8.dp)))
+                .border(width = strokeW, color = cornerColor, shape = RoundedCornerShape(bottomStart = 10.dp)))
             // Bottom-right
             Box(Modifier.align(Alignment.BottomEnd).size(cornerLen)
-                .border(width = strokeW, color = frameColor, shape = RoundedCornerShape(bottomEnd = 8.dp)))
+                .border(width = strokeW, color = cornerColor, shape = RoundedCornerShape(bottomEnd = 10.dp)))
+        }
+
+        // Status text at bottom
+        val statusText = when {
+            detectionProgress >= 3 -> "Form algılandı — çekiliyor..."
+            detectionProgress > 0 -> "Form algılanıyor... ($detectionProgress/3)"
+            else -> "Formu çerçeveye yerleştirin — otomatik taranacak"
+        }
+        val statusBg = when {
+            detectionProgress >= 2 -> CorrectGreen.copy(0.8f)
+            detectionProgress > 0 -> Color(0xFF1565C0).copy(0.8f)
+            else -> Color.Black.copy(0.6f)
         }
 
         Text(
-            "Formu çerçeveye yerleştirin — otomatik taranacak",
+            statusText,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 110.dp)
-                .background(Color.Black.copy(0.6f), RoundedCornerShape(8.dp))
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .background(statusBg, RoundedCornerShape(8.dp))
+                .padding(horizontal = 14.dp, vertical = 7.dp),
             color = Color.White,
-            fontSize = 12.sp
+            fontSize = 13.sp,
+            fontWeight = if (detectionProgress > 0) FontWeight.SemiBold else FontWeight.Normal
         )
     }
 }
@@ -487,7 +541,6 @@ private fun ResultOverlay(
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(0.6f)
                 )
 
-                // Warnings banner
                 if (phase.warnings.isNotEmpty()) {
                     Surface(
                         color = Color(0xFFFFF3E0),
@@ -524,7 +577,6 @@ private fun ResultOverlay(
                 )
                 Text("%.0f%%".format(result.percentage), fontSize = 14.sp)
 
-                // Graded optical form image with colored bubbles
                 result.gradedBitmap?.let { bitmap ->
                     HorizontalDivider(Modifier.padding(vertical = 4.dp))
                     Text("Optik Form Sonucu", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
@@ -599,5 +651,3 @@ private fun CaptureButton(enabled: Boolean, onClick: () -> Unit) {
             modifier = Modifier.size(36.dp))
     }
 }
-
-

@@ -45,7 +45,9 @@ data class CameraUiState(
     val phase: ScanPhase = ScanPhase.Idle,
     val currentExam: ExamEntity? = null,
     val previewBitmap: Bitmap? = null,
-    val batchCount: Int = 0
+    val batchCount: Int = 0,
+    /** Detection progress from SheetDetectorAnalyzer (0 = none, 3 = about to trigger) */
+    val detectionProgress: Int = 0
 )
 
 @HiltViewModel
@@ -86,6 +88,14 @@ class CameraViewModel @Inject constructor(
             if (current is ScanPhase.QrDetected || current is ScanPhase.QrScanning || current is ScanPhase.Idle) {
                 _sheetDetectedEvent.emit(Unit)
             }
+        }
+    }
+
+    /** Called periodically from UI to update detection progress indicator */
+    fun updateDetectionProgress() {
+        val progress = cameraManager.getDetectionProgress()
+        if (progress != _uiState.value.detectionProgress) {
+            _uiState.update { it.copy(detectionProgress = progress) }
         }
     }
 

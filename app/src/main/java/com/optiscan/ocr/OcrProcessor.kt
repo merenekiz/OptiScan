@@ -1,6 +1,10 @@
 package com.optiscan.ocr
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
 import android.util.Log
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -17,11 +21,13 @@ import kotlin.coroutines.resume
  * Extracts student information (name, number, class) from specific
  * regions of the warped 800×1100 answer sheet using ML Kit Text Recognition.
  *
- * Form layout (BubbleDetector coordinate space):
- *   - Title: y=35-70 (NOT student info — skip this)
- *   - Ad Soyad box: y=76-106, x=110-770
- *   - Öğrenci No box: y=116-146, x=120-~454
- *   - Şube box:     y=116-146, x=~514-770
+ * Form layout (FormPdfGenerator coordinate space):
+ *   - Ad Soyad label at x=30, box from (110,76) to (770,106) — text written inside
+ *   - Öğrenci No label at x=30, box from (120,116) to (~454,146) — text written inside
+ *   - Şube label, box from (~500,116) to (770,146) — text written inside
+ *
+ * Crops are slightly padded to capture handwritten text that may extend beyond boxes.
+ * Each crop is preprocessed (grayscale + contrast boost + upscale) before OCR.
  */
 @Singleton
 class OcrProcessor @Inject constructor() {
@@ -29,20 +35,31 @@ class OcrProcessor @Inject constructor() {
     companion object {
         private const val TAG = "OcrProcessor"
 
-        // Region coordinates in 800×1100 warped space
-        // Form layout: Name box (110,76)-(770,106), No box (120,116)-(~454,146), Sube box (~514,116)-(770,146)
-        // Crop inside the boxes with padding
-        // Ad Soyad — inside name box
-        private const val NAME_X1 = 105; private const val NAME_Y1 = 72
+        // Ad Soyad — inside name box (box is 110,76 to 770,106)
+        // Start past label "Ad Soyad:" which is at x=30..~110
+        private const val NAME_X1 = 108; private const val NAME_Y1 = 70
         private const val NAME_X2 = 775; private const val NAME_Y2 = 112
 
-        // Öğrenci No — inside number box
-        private const val NO_X1 = 110; private const val NO_Y1 = 112
-        private const val NO_X2 = 470; private const val NO_Y2 = 152
+        // Öğrenci No — inside number box (box is 120,116 to ~454,146)
+        // Start past label "Öğrenci No:" which ends at ~120
+        private const val NO_X1 = 118; private const val NO_Y1 = 110
+        private const val NO_X2 = 460; private const val NO_Y2 = 152
 
-        // Şube — inside sube box
-        private const val SUBE_X1 = 500; private const val SUBE_Y1 = 112
+        // Şube — inside sube box (box is ~540,116 to 770,146)
+        // Start past label "Şube:" which ends at ~540
+        private const val SUBE_X1 = 505; private const val SUBE_Y1 = 110
         private const val SUBE_X2 = 775; private const val SUBE_Y2 = 152
+
+        // Common OCR misreads for digits
+        private val DIGIT_SUBSTITUTIONS = mapOf(
+            'O' to '0', 'o' to '0',
+            'I' to '1', 'l' to '1', 'i' to '1', '|' to '1',
+            'Z' to '2', 'z' to '2',
+            'S' to '5', 's' to '5',
+            'G' to '6', 'g' to '9',
+            'B' to '8', 'b' to '6',
+            'q' to '9', 'D' to '0',
+        )
     }
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -53,16 +70,17 @@ class OcrProcessor @Inject constructor() {
                 val w = warpedBitmap.width
                 val h = warpedBitmap.height
 
-                // Extract each field from its specific region
-                val nameText = cropAndRecognize(warpedBitmap, NAME_X1, NAME_Y1, NAME_X2, NAME_Y2, w, h)
-                val noText = cropAndRecognize(warpedBitmap, NO_X1, NO_Y1, NO_X2, NO_Y2, w, h)
-                val subeText = cropAndRecognize(warpedBitmap, SUBE_X1, SUBE_Y1, SUBE_X2, SUBE_Y2, w, h)
+                val nameText = cropPreprocessAndRecognize(warpedBitmap, NAME_X1, NAME_Y1, NAME_X2, NAME_Y2, w, h)
+                val noText = cropPreprocessAndRecognize(warpedBitmap, NO_X1, NO_Y1, NO_X2, NO_Y2, w, h)
+                val subeText = cropPreprocessAndRecognize(warpedBitmap, SUBE_X1, SUBE_Y1, SUBE_X2, SUBE_Y2, w, h)
 
-                Log.d(TAG, "OCR regions - name='$nameText' no='$noText' sube='$subeText'")
+                Log.d(TAG, "OCR raw - name='$nameText' no='$noText' sube='$subeText'")
 
                 val name = cleanName(nameText)
                 val number = cleanNumber(noText)
                 val sube = cleanClass(subeText)
+
+                Log.d(TAG, "OCR cleaned - name='$name' no='$number' sube='$sube'")
 
                 StudentInfo(
                     name = name,
@@ -79,10 +97,9 @@ class OcrProcessor @Inject constructor() {
         }
 
     /**
-     * Crops a specific region from the warped bitmap and runs OCR.
-     * Coordinates are in 800×1100 space, scaled to actual bitmap dimensions.
+     * Crops a region, preprocesses it (grayscale + contrast + upscale 3x), then runs OCR.
      */
-    private suspend fun cropAndRecognize(
+    private suspend fun cropPreprocessAndRecognize(
         bitmap: Bitmap,
         x1: Int, y1: Int, x2: Int, y2: Int,
         bitmapW: Int, bitmapH: Int
@@ -96,9 +113,49 @@ class OcrProcessor @Inject constructor() {
         val cy2 = (y2 * scaleY).toInt().coerceIn(cy1 + 1, bitmapH)
 
         val cropped = Bitmap.createBitmap(bitmap, cx1, cy1, cx2 - cx1, cy2 - cy1)
-        val text = recognizeText(cropped)
+
+        // Preprocess: convert to high-contrast grayscale and upscale
+        val processed = preprocessForOcr(cropped)
         cropped.recycle()
+
+        val text = recognizeText(processed)
+        processed.recycle()
         return text ?: ""
+    }
+
+    /**
+     * Converts to grayscale, boosts contrast, and upscales 3x for better ML Kit accuracy.
+     */
+    private fun preprocessForOcr(bitmap: Bitmap): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+
+        // Step 1: Convert to high-contrast grayscale
+        val grayBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(grayBitmap)
+        val paint = Paint().apply {
+            // High contrast grayscale matrix
+            colorFilter = ColorMatrixColorFilter(ColorMatrix().apply {
+                setSaturation(0f)
+                // Boost contrast: scale by 1.8, offset by -100
+                val contrastArray = floatArrayOf(
+                    1.8f, 0f, 0f, 0f, -100f,
+                    0f, 1.8f, 0f, 0f, -100f,
+                    0f, 0f, 1.8f, 0f, -100f,
+                    0f, 0f, 0f, 1f, 0f
+                )
+                postConcat(ColorMatrix(contrastArray))
+            })
+        }
+        canvas.drawBitmap(bitmap, 0f, 0f, paint)
+
+        // Step 2: Upscale 3x for better OCR of small text
+        val scaledW = (w * 3).coerceAtMost(2400)
+        val scaledH = (h * 3).coerceAtMost(600)
+        val upscaled = Bitmap.createScaledBitmap(grayBitmap, scaledW, scaledH, true)
+        grayBitmap.recycle()
+
+        return upscaled
     }
 
     private suspend fun recognizeText(bitmap: Bitmap): String? =
@@ -114,9 +171,6 @@ class OcrProcessor @Inject constructor() {
                 }
         }
 
-    /**
-     * Cleans up OCR name text — removes label prefixes and non-letter chars.
-     */
     private fun cleanName(raw: String): String {
         var text = raw.trim()
         // Remove label prefix if OCR picked it up
@@ -124,23 +178,31 @@ class OcrProcessor @Inject constructor() {
         text = text.replace(Regex("(?i)^isim\\s*:?\\s*"), "")
         // Keep only letters, spaces, and Turkish chars
         text = text.replace(Regex("[^A-Za-zÇĞİÖŞÜçğışöüşÂâÎîÛû\\s]"), "").trim()
-        // Collapse multiple spaces
         text = text.replace(Regex("\\s+"), " ")
         return text
     }
 
     private fun cleanNumber(raw: String): String {
         var text = raw.trim()
+        // Remove label prefixes
         text = text.replace(Regex("(?i)^(?:okul\\s*|öğrenci\\s*)?no\\s*:?\\s*"), "")
         text = text.replace(Regex("(?i)^numara\\s*:?\\s*"), "")
-        // Extract digits
-        val digits = Regex("\\d+").find(text)?.value ?: ""
-        return digits
+
+        // Apply digit substitutions for common OCR misreads, then extract ALL digits
+        val corrected = StringBuilder()
+        for (ch in text) {
+            when {
+                ch.isDigit() -> corrected.append(ch)
+                DIGIT_SUBSTITUTIONS.containsKey(ch) -> corrected.append(DIGIT_SUBSTITUTIONS[ch])
+                // Skip non-digit characters (spaces, dashes, etc.)
+            }
+        }
+        return corrected.toString()
     }
 
     private fun cleanClass(raw: String): String {
         var text = raw.trim()
-        // Remove label prefix — handles Şube/Sube/şube and partial OCR reads like "be:" or "e:"
+        // Remove label prefix — handles Şube/Sube/şube and partial OCR reads
         text = text.replace(Regex("(?i)^[sşŞS]?[uüUÜ]?[bB]?[eE]\\s*:?\\s*"), "")
         text = text.replace(Regex("(?i)^sınıf\\s*:?\\s*"), "")
         text = text.replace(Regex("(?i)^section\\s*:?\\s*"), "")

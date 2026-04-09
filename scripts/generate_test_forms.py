@@ -78,8 +78,8 @@ def draw_form(draw, question_count, exam_title, exam_id):
     # Border
     draw.rectangle([0, 0, SHEET_WIDTH - 1, SHEET_HEIGHT - 1], outline="#CCCCCC", width=1)
 
-    # Corner alignment markers
-    s = 24
+    # Corner alignment markers (larger for reliable camera detection)
+    s = 32
     m = 4
     for x, y in [(m, m), (SHEET_WIDTH - m - s, m), (m, SHEET_HEIGHT - m - s), (SHEET_WIDTH - m - s, SHEET_HEIGHT - m - s)]:
         draw.rectangle([x, y, x + s, y + s], fill="black")

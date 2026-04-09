@@ -14,6 +14,10 @@ import javax.inject.Singleton
  * The bubble grid dynamically fills the available area based on question count.
  * Sheet is always 800×1100 px after warp.
  * Header occupies top ~200px, grid fills the rest.
+ *
+ * For real camera photos: applies CLAHE contrast enhancement before thresholding,
+ * tries multiple adaptive threshold parameters, and uses a slightly larger
+ * measurement radius to tolerate small alignment errors from perspective warp.
  */
 @Singleton
 class BubbleDetector @Inject constructor() {
@@ -35,54 +39,46 @@ class BubbleDetector @Inject constructor() {
         // If >maxSingleColRows, use two columns
         const val MAX_SINGLE_COL_ROWS = 30
 
-        // Fill thresholds
-        private const val FILL_THRESHOLD = 0.40f
-        private const val AMBIGUOUS_THRESHOLD = 0.20f
+        // Fill thresholds — lowered for real pencil marks on camera photos
+        private const val FILL_THRESHOLD = 0.32f
+        private const val AMBIGUOUS_THRESHOLD = 0.15f
     }
 
-    /**
-     * Compute grid layout for a given question count.
-     * Returns all the spacing/offset values needed for detection and drawing.
-     */
     data class GridLayout(
         val useSecondCol: Boolean,
         val col1Count: Int,
         val col2Count: Int,
-        val rowHeight: Int,       // px per row
-        val optSpacing: Int,      // px between option centers
-        val col1X: Int,           // x start of column 1 bubbles
-        val col2X: Int,           // x start of column 2 bubbles (0 if single col)
-        val questionNumX1: Int,   // x for question numbers col 1
-        val questionNumX2: Int    // x for question numbers col 2
+        val rowHeight: Int,
+        val optSpacing: Int,
+        val col1X: Int,
+        val col2X: Int,
+        val questionNumX1: Int,
+        val questionNumX2: Int
     )
 
     fun computeLayout(questionCount: Int): GridLayout {
         val safeCount = questionCount.coerceAtLeast(1)
-        val availH = SHEET_HEIGHT - GRID_START_Y - GRID_BOTTOM_MARGIN  // ~870
-        val availW = SHEET_WIDTH - 2 * GRID_MARGIN_X                    // ~740
+        val availH = SHEET_HEIGHT - GRID_START_Y - GRID_BOTTOM_MARGIN
+        val availW = SHEET_WIDTH - 2 * GRID_MARGIN_X
 
         val useSecondCol = safeCount > MAX_SINGLE_COL_ROWS
         val col1Count: Int
         val col2Count: Int
 
         if (useSecondCol) {
-            col1Count = (safeCount + 1) / 2  // e.g. 35 -> 18
-            col2Count = safeCount - col1Count // e.g. 35 -> 17
+            col1Count = (safeCount + 1) / 2
+            col2Count = safeCount - col1Count
         } else {
             col1Count = safeCount
             col2Count = 0
         }
 
         val maxRows = maxOf(col1Count, col2Count)
-        // Row height: fill available height, cap at 36 for readability
         val rowHeight = minOf(availH / maxRows, 36)
 
         if (useSecondCol) {
-            // Two columns: each gets half width minus gap
             val colGap = 40
             val colWidth = (availW - colGap) / 2
-            // 5 options in colWidth: spacing = colWidth / 5
-            // Leave room for question number (25px)
             val qNumWidth = 28
             val bubbleArea = colWidth - qNumWidth
             val optSpacing = bubbleArea / NUM_OPTIONS
@@ -99,7 +95,6 @@ class BubbleDetector @Inject constructor() {
                 questionNumX2 = GRID_MARGIN_X + colWidth + colGap + qNumWidth - 4
             )
         } else {
-            // Single column: center in available width
             val qNumWidth = 28
             val bubbleArea = availW - qNumWidth
             val optSpacing = bubbleArea / NUM_OPTIONS
@@ -118,73 +113,112 @@ class BubbleDetector @Inject constructor() {
 
     fun detectBubbles(sheetMat: Mat, questionCount: Int): List<DetectedBubble> {
         val gray = Mat()
-        val thresh = Mat()
         val detectedBubbles = mutableListOf<DetectedBubble>()
         val layout = computeLayout(questionCount)
 
         try {
             Imgproc.cvtColor(sheetMat, gray, Imgproc.COLOR_RGBA2GRAY)
 
-            Imgproc.adaptiveThreshold(
-                gray, thresh, 255.0,
-                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
-                Imgproc.THRESH_BINARY_INV,
-                15, 8.0
+            // Apply CLAHE to normalize uneven lighting from camera photos
+            val clahe = Imgproc.createCLAHE(3.0, Size(8.0, 8.0))
+            val enhanced = Mat()
+            clahe.apply(gray, enhanced)
+
+            // Try multiple threshold parameter sets and pick the best one
+            val threshResults = mutableListOf<Pair<Mat, List<DetectedBubble>>>()
+
+            val paramSets = listOf(
+                Pair(15, 8.0),   // original — works for clean digital images
+                Pair(21, 10.0),  // slightly larger block — better for camera photos
+                Pair(31, 12.0),  // large block — handles uneven lighting
             )
 
-            val kernel = Imgproc.getStructuringElement(
-                Imgproc.MORPH_ELLIPSE, Size(3.0, 3.0)
-            )
-            Imgproc.morphologyEx(thresh, thresh, Imgproc.MORPH_OPEN, kernel)
-            kernel.release()
+            for ((blockSize, c) in paramSets) {
+                val thresh = Mat()
+                Imgproc.adaptiveThreshold(
+                    enhanced, thresh, 255.0,
+                    Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    Imgproc.THRESH_BINARY_INV,
+                    blockSize, c
+                )
 
-            Log.d(TAG, "detectBubbles: qCount=$questionCount, layout=$layout, sheet=${sheetMat.cols()}x${sheetMat.rows()}")
+                val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(3.0, 3.0))
+                Imgproc.morphologyEx(thresh, thresh, Imgproc.MORPH_OPEN, kernel)
+                kernel.release()
 
-            // Column 1
-            for (q in 0 until layout.col1Count) {
-                val cy = GRID_START_Y + q * layout.rowHeight + layout.rowHeight / 2
-                if (cy + BUBBLE_DIAMETER / 2 >= SHEET_HEIGHT) break
-
-                for (opt in 0 until NUM_OPTIONS) {
-                    val cx = layout.col1X + opt * layout.optSpacing + BUBBLE_DIAMETER / 2
-                    if (cx + BUBBLE_DIAMETER / 2 >= SHEET_WIDTH) continue
-
-                    val fillPct = measureBubbleFill(thresh, cx, cy, BUBBLE_DIAMETER / 2 - 2)
-                    val state = classifyFill(fillPct)
-
-
-                    detectedBubbles.add(DetectedBubble(q, opt, state, fillPct, cx, cy))
-                }
+                val bubbles = detectBubblesFromThresh(thresh, layout, questionCount)
+                threshResults.add(Pair(thresh, bubbles))
             }
 
-            // Column 2
-            if (layout.useSecondCol) {
-                for (q in 0 until layout.col2Count) {
-                    val globalQ = layout.col1Count + q
-                    val cy = GRID_START_Y + q * layout.rowHeight + layout.rowHeight / 2
-                    if (cy + BUBBLE_DIAMETER / 2 >= SHEET_HEIGHT) break
+            enhanced.release()
 
-                    for (opt in 0 until NUM_OPTIONS) {
-                        val cx = layout.col2X + opt * layout.optSpacing + BUBBLE_DIAMETER / 2
-                        if (cx + BUBBLE_DIAMETER / 2 >= SHEET_WIDTH) continue
-
-                        val fillPct = measureBubbleFill(thresh, cx, cy, BUBBLE_DIAMETER / 2 - 2)
-                        val state = classifyFill(fillPct)
-
-
-                        detectedBubbles.add(DetectedBubble(globalQ, opt, state, fillPct, cx, cy))
-                    }
-                }
+            // Pick the threshold that gives the most "clean" results:
+            // Prefer the one with the most FILLED (single per question) answers and fewest AMBIGUOUS
+            val best = threshResults.maxByOrNull { (_, bubbles) ->
+                val answers = resolveAnswers(bubbles, questionCount)
+                val answeredCount = answers.count { it.isNotBlank() }
+                val ambiguousCount = bubbles.count { it.state == BubbleState.AMBIGUOUS }
+                answeredCount * 10 - ambiguousCount
             }
+
+            threshResults.forEach { (mat, _) -> mat.release() }
+
+            if (best != null) {
+                detectedBubbles.addAll(best.second)
+            }
+
+            Log.d(TAG, "detectBubbles: qCount=$questionCount, detected=${detectedBubbles.size} bubbles")
 
         } catch (e: Exception) {
             Log.e(TAG, "Bubble detection failed: ${e.message}", e)
         } finally {
             gray.release()
-            thresh.release()
         }
 
         return detectedBubbles
+    }
+
+    private fun detectBubblesFromThresh(
+        thresh: Mat, layout: GridLayout, questionCount: Int
+    ): List<DetectedBubble> {
+        val bubbles = mutableListOf<DetectedBubble>()
+        // Use slightly larger measurement radius to tolerate small warp alignment errors
+        val measureRadius = BUBBLE_DIAMETER / 2
+
+        // Column 1
+        for (q in 0 until layout.col1Count) {
+            val cy = GRID_START_Y + q * layout.rowHeight + layout.rowHeight / 2
+            if (cy + BUBBLE_DIAMETER / 2 >= SHEET_HEIGHT) break
+
+            for (opt in 0 until NUM_OPTIONS) {
+                val cx = layout.col1X + opt * layout.optSpacing + BUBBLE_DIAMETER / 2
+                if (cx + BUBBLE_DIAMETER / 2 >= SHEET_WIDTH) continue
+
+                val fillPct = measureBubbleFill(thresh, cx, cy, measureRadius)
+                val state = classifyFill(fillPct)
+                bubbles.add(DetectedBubble(q, opt, state, fillPct, cx, cy))
+            }
+        }
+
+        // Column 2
+        if (layout.useSecondCol) {
+            for (q in 0 until layout.col2Count) {
+                val globalQ = layout.col1Count + q
+                val cy = GRID_START_Y + q * layout.rowHeight + layout.rowHeight / 2
+                if (cy + BUBBLE_DIAMETER / 2 >= SHEET_HEIGHT) break
+
+                for (opt in 0 until NUM_OPTIONS) {
+                    val cx = layout.col2X + opt * layout.optSpacing + BUBBLE_DIAMETER / 2
+                    if (cx + BUBBLE_DIAMETER / 2 >= SHEET_WIDTH) continue
+
+                    val fillPct = measureBubbleFill(thresh, cx, cy, measureRadius)
+                    val state = classifyFill(fillPct)
+                    bubbles.add(DetectedBubble(globalQ, opt, state, fillPct, cx, cy))
+                }
+            }
+        }
+
+        return bubbles
     }
 
     private fun classifyFill(fillPct: Float) = when {
@@ -236,7 +270,13 @@ class BubbleDetector @Inject constructor() {
                     answers[q] = optionLabels.getOrElse(filledBubbles[0].optionIndex) { "" }
                 }
                 filledBubbles.size > 1 -> {
-                    answers[q] = ""
+                    // Multiple fills — pick the strongest one if it's clearly dominant
+                    val sorted = filledBubbles.sortedByDescending { it.fillPercentage }
+                    if (sorted.size >= 2 && sorted[0].fillPercentage > sorted[1].fillPercentage * 1.5f) {
+                        answers[q] = optionLabels.getOrElse(sorted[0].optionIndex) { "" }
+                    } else {
+                        answers[q] = ""  // truly ambiguous
+                    }
                 }
                 else -> {
                     val ambiguous = questionBubbles.filter { it.state == BubbleState.AMBIGUOUS }

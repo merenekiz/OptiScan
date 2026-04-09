@@ -224,6 +224,9 @@ class CameraManager @Inject constructor() {
         sheetDetector?.disable()
     }
 
+    /** Returns current detection progress (0..3) from the sheet detector */
+    fun getDetectionProgress(): Int = sheetDetector?.detectionProgress ?: 0
+
     fun shutdown() {
         cameraProvider?.unbindAll()
         isBound = false

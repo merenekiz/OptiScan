@@ -156,7 +156,7 @@ class FormPdfGenerator @Inject constructor(
 
     private fun drawAlignmentMarkers(canvas: Canvas, formW: Int, formH: Int) {
         val paint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
-        val s = 24f; val m = 4f
+        val s = 32f; val m = 4f
         canvas.drawRect(m, m, m + s, m + s, paint)
         canvas.drawRect(formW - m - s, m, formW - m, m + s, paint)
         canvas.drawRect(m, formH - m - s, m + s, formH - m, paint)

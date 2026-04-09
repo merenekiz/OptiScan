@@ -16,11 +16,14 @@ import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
- * CameraX analyzer that detects a sheet (quadrilateral with ~A4 ratio)
+ * CameraX analyzer that detects the form's 4 black alignment markers
  * in the camera preview. After [REQUIRED_STABLE_FRAMES] consecutive
  * positive detections it fires [onSheetDetected] once and disables itself.
+ *
+ * Also exposes [detectionProgress] (0..REQUIRED_STABLE_FRAMES) for UI feedback.
  */
 class SheetDetectorAnalyzer(
     private val onSheetDetected: () -> Unit
@@ -28,17 +31,26 @@ class SheetDetectorAnalyzer(
 
     companion object {
         private const val TAG = "SheetDetector"
-        private const val REQUIRED_STABLE_FRAMES = 4
+        private const val REQUIRED_STABLE_FRAMES = 3
+        private const val DOWNSCALE_WIDTH = 400
+        // Marker detection params (relative to downscaled image)
+        private const val MIN_MARKER_AREA_RATIO = 0.0001
+        private const val MAX_MARKER_AREA_RATIO = 0.02
+        // Quad formed by markers should cover a reasonable portion of the image
+        private const val MIN_QUAD_AREA_RATIO = 0.08
+        private const val MAX_QUAD_AREA_RATIO = 0.95
+        // Expected aspect ratio of the form (width/height)
         private const val EXPECTED_RATIO = 800.0 / 1100.0  // ~0.727
-        private const val RATIO_TOLERANCE = 0.22
-        private const val MIN_AREA_RATIO = 0.05
-        private const val MAX_AREA_RATIO = 0.92
-        private const val DOWNSCALE_WIDTH = 320  // process at low res for speed
+        private const val RATIO_TOLERANCE = 0.15
     }
 
     private var stableCount = 0
     @Volatile private var enabled = true
     @Volatile private var processing = false
+
+    /** Observable detection progress for UI (0 = nothing, REQUIRED_STABLE_FRAMES = about to trigger) */
+    @Volatile var detectionProgress: Int = 0
+        private set
 
     @androidx.camera.core.ExperimentalGetImage
     override fun analyze(imageProxy: ImageProxy) {
@@ -58,7 +70,6 @@ class SheetDetectorAnalyzer(
         try {
             if (bitmap == null) return
 
-            // Downscale for fast processing
             val scale = DOWNSCALE_WIDTH.toFloat() / bitmap.width.coerceAtLeast(1)
             val small = Bitmap.createScaledBitmap(
                 bitmap,
@@ -68,21 +79,23 @@ class SheetDetectorAnalyzer(
             )
             bitmap.recycle()
 
-            val detected = detectSheet(small)
+            val detected = detectMarkers(small)
             small.recycle()
 
             if (detected) {
                 stableCount++
-                Log.d(TAG, "Sheet detected ($stableCount/$REQUIRED_STABLE_FRAMES)")
+                detectionProgress = stableCount.coerceAtMost(REQUIRED_STABLE_FRAMES)
+                Log.d(TAG, "Markers detected ($stableCount/$REQUIRED_STABLE_FRAMES)")
                 if (stableCount >= REQUIRED_STABLE_FRAMES) {
                     Log.d(TAG, "Sheet stable — triggering capture")
                     enabled = false
                     stableCount = 0
+                    detectionProgress = REQUIRED_STABLE_FRAMES
                     onSheetDetected()
                 }
             } else {
-                // Decay slowly so brief occlusion doesn't reset progress
                 if (stableCount > 0) stableCount--
+                detectionProgress = stableCount
             }
         } catch (e: Exception) {
             Log.w(TAG, "Frame analysis error: ${e.message}")
@@ -91,91 +104,149 @@ class SheetDetectorAnalyzer(
         }
     }
 
-    private fun detectSheet(bitmap: Bitmap): Boolean {
+    /**
+     * Detects 4 alignment markers (filled black squares) and validates
+     * they form a quadrilateral with roughly the expected form aspect ratio.
+     */
+    private fun detectMarkers(bitmap: Bitmap): Boolean {
         val mat = Mat()
         Utils.bitmapToMat(bitmap, mat)
         val gray = Mat()
-        val blurred = Mat()
-        val edges = Mat()
+        val thresh = Mat()
 
         try {
             Imgproc.cvtColor(mat, gray, Imgproc.COLOR_RGBA2GRAY)
-            Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
 
-            // Try two threshold strategies
-            for (factor in doubleArrayOf(0.5, 0.33)) {
-                val median = computeMedian(blurred)
-                val lower = max(0.0, factor * median)
-                val upper = min(255.0, (2.0 - factor) * median)
-                Imgproc.Canny(blurred, edges, lower, upper)
+            val imageArea = mat.rows().toDouble() * mat.cols().toDouble()
+            val minMarkerArea = imageArea * MIN_MARKER_AREA_RATIO
+            val maxMarkerArea = imageArea * MAX_MARKER_AREA_RATIO
 
-                val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
-                Imgproc.dilate(edges, edges, kernel)
-                kernel.release()
+            // Try multiple binarization strategies
+            val strategies = listOf(
+                // Strategy 1: Otsu threshold
+                { src: Mat, dst: Mat ->
+                    Imgproc.threshold(src, dst, 0.0, 255.0,
+                        Imgproc.THRESH_BINARY_INV or Imgproc.THRESH_OTSU)
+                },
+                // Strategy 2: Adaptive threshold (small block)
+                { src: Mat, dst: Mat ->
+                    Imgproc.adaptiveThreshold(src, dst, 255.0,
+                        Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV,
+                        21, 10.0)
+                },
+                // Strategy 3: Adaptive threshold (large block)
+                { src: Mat, dst: Mat ->
+                    Imgproc.adaptiveThreshold(src, dst, 255.0,
+                        Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV,
+                        51, 12.0)
+                }
+            )
 
-                val contours = mutableListOf<MatOfPoint>()
-                val hierarchy = Mat()
-                Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-                hierarchy.release()
+            for (strategy in strategies) {
+                strategy(gray, thresh)
 
-                val imageArea = mat.rows().toDouble() * mat.cols().toDouble()
-                val sorted = contours.sortedByDescending { Imgproc.contourArea(it) }
-
-                for (contour in sorted) {
-                    val area = Imgproc.contourArea(contour)
-                    if (area < imageArea * MIN_AREA_RATIO) break
-                    if (area > imageArea * MAX_AREA_RATIO) continue
-
-                    val peri = Imgproc.arcLength(MatOfPoint2f(*contour.toArray()), true)
-                    val approx = MatOfPoint2f()
-                    Imgproc.approxPolyDP(MatOfPoint2f(*contour.toArray()), approx, 0.02 * peri, true)
-
-                    if (approx.rows() == 4) {
-                        val pts = approx.toArray()
-                        val rect = Imgproc.minAreaRect(MatOfPoint2f(*pts))
-                        val w = min(rect.size.width, rect.size.height)
-                        val h = max(rect.size.width, rect.size.height)
-                        if (h > 0) {
-                            val ratio = w / h
-                            approx.release()
-                            contours.forEach { it.release() }
-                            return abs(ratio - EXPECTED_RATIO) < RATIO_TOLERANCE
+                val corners = findMarkerCorners(thresh, mat.cols(), mat.rows(),
+                    minMarkerArea, maxMarkerArea, imageArea)
+                if (corners != null) {
+                    // Validate aspect ratio of the quadrilateral
+                    val w = ((distance(corners[0], corners[1]) + distance(corners[3], corners[2])) / 2.0)
+                    val h = ((distance(corners[0], corners[3]) + distance(corners[1], corners[2])) / 2.0)
+                    if (h > 0) {
+                        val ratio = w / h
+                        if (abs(ratio - EXPECTED_RATIO) < RATIO_TOLERANCE) {
+                            return true
                         }
-                        approx.release()
-                    } else {
-                        approx.release()
                     }
                 }
-                contours.forEach { it.release() }
             }
-            return false
 
+            return false
         } finally {
             mat.release()
             gray.release()
-            blurred.release()
-            edges.release()
+            thresh.release()
         }
     }
 
-    private fun computeMedian(mat: Mat): Double {
-        val hist = Mat()
-        val channels = MatOfInt(0)
-        val histSize = MatOfInt(256)
-        val ranges = MatOfFloat(0f, 256f)
-        val mask = Mat()
-        Imgproc.calcHist(listOf(mat), channels, mask, hist, histSize, ranges)
-        channels.release(); histSize.release(); ranges.release(); mask.release()
+    private fun findMarkerCorners(
+        thresh: Mat, imgW: Int, imgH: Int,
+        minArea: Double, maxArea: Double, imageArea: Double
+    ): Array<Point>? {
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        Imgproc.findContours(thresh, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
+        hierarchy.release()
 
-        val total = mat.rows() * mat.cols()
-        var cum = 0.0
-        for (i in 0 until 256) {
-            cum += hist.get(i, 0)[0]
-            if (cum >= total / 2.0) { hist.release(); return i.toDouble() }
+        data class Candidate(val cx: Double, val cy: Double)
+        val candidates = mutableListOf<Candidate>()
+
+        for (contour in contours) {
+            val area = Imgproc.contourArea(contour)
+            if (area < minArea || area > maxArea) continue
+
+            val rect = Imgproc.boundingRect(contour)
+            val aspect = rect.width.toDouble() / rect.height.toDouble()
+            // Must be roughly square
+            if (aspect < 0.5 || aspect > 2.0) continue
+
+            // Solidity check — must be mostly filled
+            val hull = MatOfInt()
+            Imgproc.convexHull(contour, hull)
+            val hullIndices = hull.toArray()
+            val contourPts = contour.toArray()
+            if (hullIndices.size >= 3) {
+                val hullPoints = hullIndices.map { contourPts[it] }
+                val hullMat = MatOfPoint(*hullPoints.toTypedArray())
+                val hullArea = Imgproc.contourArea(hullMat)
+                val solidity = if (hullArea > 0) area / hullArea else 0.0
+                hullMat.release()
+                if (solidity < 0.75) { hull.release(); continue }
+            }
+            hull.release()
+
+            candidates.add(Candidate(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0))
         }
-        hist.release()
-        return 127.0
+        contours.forEach { it.release() }
+
+        if (candidates.size < 4) return null
+
+        // Pick the 4 candidates closest to image corners
+        val imgCorners = arrayOf(
+            Point(0.0, 0.0),
+            Point(imgW.toDouble(), 0.0),
+            Point(imgW.toDouble(), imgH.toDouble()),
+            Point(0.0, imgH.toDouble())
+        )
+
+        val found = Array(4) { idx ->
+            val target = imgCorners[idx]
+            val best = candidates.minByOrNull { distance(Point(it.cx, it.cy), target) }
+                ?: return null
+            Point(best.cx, best.cy)
+        }
+
+        // Validate quadrilateral area
+        val quadArea = shoelaceArea(found)
+        if (quadArea < imageArea * MIN_QUAD_AREA_RATIO || quadArea > imageArea * MAX_QUAD_AREA_RATIO) {
+            return null
+        }
+
+        return found // TL, TR, BR, BL
     }
+
+    private fun shoelaceArea(pts: Array<Point>): Double {
+        val n = pts.size
+        var area = 0.0
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            area += pts[i].x * pts[j].y
+            area -= pts[j].x * pts[i].y
+        }
+        return abs(area) / 2.0
+    }
+
+    private fun distance(a: Point, b: Point): Double =
+        sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y))
 
     @androidx.camera.core.ExperimentalGetImage
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
@@ -200,7 +271,7 @@ class SheetDetectorAnalyzer(
             uBuffer.get(nv21, ySize + vSize, uSize)
             val yuv = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
             val out = ByteArrayOutputStream()
-            yuv.compressToJpeg(Rect(0, 0, imageProxy.width, imageProxy.height), 40, out)
+            yuv.compressToJpeg(Rect(0, 0, imageProxy.width, imageProxy.height), 50, out)
             return BitmapFactory.decodeByteArray(out.toByteArray(), 0, out.size())
                 ?.applyRotation(imageProxy.imageInfo.rotationDegrees)
         }
@@ -217,6 +288,7 @@ class SheetDetectorAnalyzer(
 
     fun reset() {
         stableCount = 0
+        detectionProgress = 0
         enabled = true
     }
 
