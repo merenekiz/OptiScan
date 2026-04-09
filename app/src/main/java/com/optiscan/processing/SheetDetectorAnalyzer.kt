@@ -31,7 +31,7 @@ class SheetDetectorAnalyzer(
 
     companion object {
         private const val TAG = "SheetDetector"
-        private const val REQUIRED_STABLE_FRAMES = 3
+        private const val REQUIRED_STABLE_FRAMES = 6
         private const val DOWNSCALE_WIDTH = 400
         // Marker detection params (relative to downscaled image)
         private const val MIN_MARKER_AREA_RATIO = 0.0001

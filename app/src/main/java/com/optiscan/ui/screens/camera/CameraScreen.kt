@@ -90,9 +90,10 @@ fun CameraScreen(
         }
     }
 
-    // Auto-capture when sheet is detected
+    // Auto-capture when sheet is detected — wait 1s for camera to focus
     LaunchedEffect(Unit) {
         viewModel.sheetDetectedEvent.collect {
+            delay(1000)
             viewModel.captureAndProcess(context)
         }
     }
@@ -390,7 +391,7 @@ private fun ScanGuideOverlay(detectionProgress: Int = 0) {
     val strokeW = 5.dp
 
     // Animate corner color based on detection progress (0=cyan, 3=green)
-    val progressFraction = (detectionProgress / 3f).coerceIn(0f, 1f)
+    val progressFraction = (detectionProgress / 6f).coerceIn(0f, 1f)
     val cornerColor by animateColorAsState(
         targetValue = if (progressFraction > 0.3f) {
             Color(
@@ -447,12 +448,13 @@ private fun ScanGuideOverlay(detectionProgress: Int = 0) {
 
         // Status text at bottom
         val statusText = when {
-            detectionProgress >= 3 -> "Form algılandı — çekiliyor..."
-            detectionProgress > 0 -> "Form algılanıyor... ($detectionProgress/3)"
+            detectionProgress >= 6 -> "Form algılandı — odaklanıyor..."
+            detectionProgress >= 3 -> "Form algılanıyor... sabit tutun"
+            detectionProgress > 0 -> "Form algılanıyor... ($detectionProgress/6)"
             else -> "Formu çerçeveye yerleştirin — otomatik taranacak"
         }
         val statusBg = when {
-            detectionProgress >= 2 -> CorrectGreen.copy(0.8f)
+            detectionProgress >= 4 -> CorrectGreen.copy(0.8f)
             detectionProgress > 0 -> Color(0xFF1565C0).copy(0.8f)
             else -> Color.Black.copy(0.6f)
         }
