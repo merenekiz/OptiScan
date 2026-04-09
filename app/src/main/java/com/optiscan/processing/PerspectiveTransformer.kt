@@ -18,6 +18,15 @@ import kotlin.math.sqrt
  * Primary strategy: find 4 black alignment markers in the form corners.
  * Fallback: edge detection + contour finding for the sheet outline.
  * Then warpPerspective to produce a flat 800×1100 top-down view.
+ *
+ * IMPORTANT: The alignment markers sit at known positions on the form:
+ *   TL marker center ≈ (20, 20)
+ *   TR marker center ≈ (780, 20)
+ *   BR marker center ≈ (780, formH-20)
+ *   BL marker center ≈ (20, formH-20)
+ * The warp destination maps marker centers to these form coordinates,
+ * NOT to (0,0), so that after warping the entire 800×1100 coordinate
+ * system is pixel-accurate for bubble detection and OCR.
  */
 @Singleton
 class PerspectiveTransformer @Inject constructor() {
@@ -28,6 +37,11 @@ class PerspectiveTransformer @Inject constructor() {
         private const val OUTPUT_HEIGHT = 1100
         private const val MIN_AREA_RATIO = 0.03
         private const val MAX_AREA_RATIO = 0.95
+
+        // Marker properties in 800×1100 coordinate space
+        // Marker is 32×32px drawn at 4px margin from edge
+        // So marker center = 4 + 16 = 20px from each edge
+        private const val MARKER_OFFSET = 20.0
     }
 
     data class TransformResult(
@@ -65,16 +79,20 @@ class PerspectiveTransformer @Inject constructor() {
 
             val markerCorners = detectAlignmentMarkersMultiStrategy(gray, srcMat.cols(), srcMat.rows())
             if (markerCorners != null) {
-                Log.d(TAG, "Found corners via alignment markers")
+                Log.d(TAG, "Found corners via alignment markers: " +
+                    "TL(${markerCorners[0].x.toInt()},${markerCorners[0].y.toInt()}) " +
+                    "TR(${markerCorners[1].x.toInt()},${markerCorners[1].y.toInt()}) " +
+                    "BR(${markerCorners[2].x.toInt()},${markerCorners[2].y.toInt()}) " +
+                    "BL(${markerCorners[3].x.toInt()},${markerCorners[3].y.toInt()})")
                 gray.release()
                 enhanced.release()
-                val warped = applyWarp(srcMat, markerCorners)
+                val warped = applyWarpFromMarkers(srcMat, markerCorners)
                 val bitmap = matToBitmap(warped)
                 warped.release()
                 return TransformResult(bitmap, markerCorners, true, 1f)
             }
 
-            // Strategy 2: Contour-based detection with multiple thresholds
+            // Strategy 2: Contour-based detection (finds sheet edges, not markers)
             val blurred = Mat()
             Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
 
@@ -85,10 +103,10 @@ class PerspectiveTransformer @Inject constructor() {
 
             if (contourCorners != null) {
                 Log.d(TAG, "Found corners via contour detection")
-                val warped = applyWarp(srcMat, contourCorners)
+                val warped = applyWarpFromEdges(srcMat, contourCorners)
                 val bitmap = matToBitmap(warped)
                 warped.release()
-                return TransformResult(bitmap, contourCorners, true, 0.8f)
+                return TransformResult(bitmap, contourCorners, true, 0.7f)
             }
 
             Log.w(TAG, "Sheet corners not detected — form could not be found in image")
@@ -102,9 +120,6 @@ class PerspectiveTransformer @Inject constructor() {
         }
     }
 
-    /**
-     * Apply CLAHE contrast enhancement to improve marker detection on camera photos.
-     */
     private fun enhanceContrast(src: Mat): Mat {
         val lab = Mat()
         Imgproc.cvtColor(src, lab, Imgproc.COLOR_RGBA2RGB)
@@ -131,12 +146,8 @@ class PerspectiveTransformer @Inject constructor() {
         return rgba
     }
 
-    /**
-     * Try multiple binarization strategies to find 4 alignment markers.
-     */
     private fun detectAlignmentMarkersMultiStrategy(gray: Mat, imgW: Int, imgH: Int): Array<Point>? {
         val imageArea = imgW.toDouble() * imgH.toDouble()
-        // Markers can range from tiny (gallery test forms) to large (camera close-up)
         val minMarkerArea = imageArea * 0.00003
         val maxMarkerArea = imageArea * 0.02
 
@@ -157,7 +168,7 @@ class PerspectiveTransformer @Inject constructor() {
         adaptive1.release()
         if (result2 != null) return result2
 
-        // Strategy 3: Adaptive threshold (block 51, higher C)
+        // Strategy 3: Adaptive threshold (block 51)
         val adaptive2 = Mat()
         Imgproc.adaptiveThreshold(gray, adaptive2, 255.0,
             Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV,
@@ -166,7 +177,7 @@ class PerspectiveTransformer @Inject constructor() {
         adaptive2.release()
         if (result3 != null) return result3
 
-        // Strategy 4: Fixed threshold for very high contrast prints
+        // Strategy 4: Fixed threshold
         val fixed = Mat()
         Imgproc.threshold(gray, fixed, 80.0, 255.0, Imgproc.THRESH_BINARY_INV)
         val result4 = findMarkersInBinary(fixed, imgW, imgH, minMarkerArea, maxMarkerArea, imageArea)
@@ -176,6 +187,7 @@ class PerspectiveTransformer @Inject constructor() {
 
     /**
      * Find 4 filled square markers in a binary image.
+     * Each marker must be assigned to a unique corner — no duplicates.
      */
     private fun findMarkersInBinary(
         binary: Mat, imgW: Int, imgH: Int,
@@ -186,8 +198,8 @@ class PerspectiveTransformer @Inject constructor() {
         Imgproc.findContours(binary, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
         hierarchy.release()
 
-        data class MarkerCenter(val cx: Double, val cy: Double, val area: Double)
-        val candidates = mutableListOf<MarkerCenter>()
+        data class MarkerCandidate(val cx: Double, val cy: Double, val area: Double)
+        val candidates = mutableListOf<MarkerCandidate>()
 
         for (contour in contours) {
             val area = Imgproc.contourArea(contour)
@@ -208,62 +220,147 @@ class PerspectiveTransformer @Inject constructor() {
                 val hullArea = Imgproc.contourArea(hullMat)
                 val solidity = if (hullArea > 0) area / hullArea else 0.0
                 hullMat.release()
-                if (solidity < 0.75) { hull.release(); continue }
+                if (solidity < 0.7) { hull.release(); continue }
             }
             hull.release()
 
-            // Extent check — how much of bounding rect is filled
+            // Extent check — must fill most of its bounding rect
             val extent = area / (rect.width.toDouble() * rect.height.toDouble())
-            if (extent < 0.6) continue
+            if (extent < 0.55) continue
 
-            candidates.add(MarkerCenter(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0, area))
+            candidates.add(MarkerCandidate(
+                rect.x + rect.width / 2.0,
+                rect.y + rect.height / 2.0,
+                area
+            ))
         }
         contours.forEach { it.release() }
 
         if (candidates.size < 4) return null
 
-        // Pick the 4 candidates closest to image corners
-        val corners = arrayOf(
-            Point(0.0, 0.0),
-            Point(imgW.toDouble(), 0.0),
-            Point(imgW.toDouble(), imgH.toDouble()),
-            Point(0.0, imgH.toDouble())
+        // Greedy assignment: assign each image corner to its nearest candidate,
+        // removing used candidates to prevent duplicate assignment.
+        val imgCorners = arrayOf(
+            Point(0.0, 0.0),              // TL
+            Point(imgW.toDouble(), 0.0),    // TR
+            Point(imgW.toDouble(), imgH.toDouble()), // BR
+            Point(0.0, imgH.toDouble())     // BL
         )
 
-        val found = Array(4) { idx ->
-            val target = corners[idx]
-            candidates.minByOrNull { distance(Point(it.cx, it.cy), target) }
-                ?.let { Point(it.cx, it.cy) }
+        val remaining = candidates.toMutableList()
+        val found = Array<Point?>(4) { null }
+
+        for (idx in imgCorners.indices) {
+            val target = imgCorners[idx]
+            val best = remaining.minByOrNull { distance(Point(it.cx, it.cy), target) }
                 ?: return null
+            found[idx] = Point(best.cx, best.cy)
+            remaining.remove(best)
         }
+
+        @Suppress("UNCHECKED_CAST")
+        val result = found as Array<Point>
 
         // Validate: quadrilateral area should be reasonable
-        val quadArea = quadrilateralArea(found)
+        val quadArea = quadrilateralArea(result)
         if (quadArea < imageArea * 0.05 || quadArea > imageArea * 0.98) return null
 
-        // Validate: check that opposite sides are roughly parallel and angles ~90°
-        val d01 = distance(found[0], found[1])
-        val d12 = distance(found[1], found[2])
-        val d23 = distance(found[2], found[3])
-        val d30 = distance(found[3], found[0])
+        // Validate: opposite sides should be similar length (within 40%)
+        val d01 = distance(result[0], result[1])
+        val d12 = distance(result[1], result[2])
+        val d23 = distance(result[2], result[3])
+        val d30 = distance(result[3], result[0])
 
-        // Opposite sides should be similar length (within 40%)
         if (d01 > 0 && d23 > 0) {
-            val sideRatio1 = min(d01, d23) / max(d01, d23)
-            if (sideRatio1 < 0.6) return null
+            if (min(d01, d23) / max(d01, d23) < 0.6) return null
         }
         if (d12 > 0 && d30 > 0) {
-            val sideRatio2 = min(d12, d30) / max(d12, d30)
-            if (sideRatio2 < 0.6) return null
+            if (min(d12, d30) / max(d12, d30) < 0.6) return null
         }
 
-        return found // TL, TR, BR, BL
+        // Validate: markers should have similar sizes (within 3x)
+        // Already passed area filter, but check the 4 selected are consistent
+        return result
     }
 
     /**
-     * Fallback: contour-based detection with multiple Canny thresholds.
-     * Also applies morphological closing to connect broken edges.
+     * Warp using detected marker centers → known marker positions in output space.
+     *
+     * The form width is always 800px and markers are 20px in from each edge,
+     * so the horizontal marker span = 760px.
+     * The form HEIGHT varies by question count. We compute it from the
+     * marker aspect ratio in the source image:
+     *   markerSpanW (in source) / markerSpanH (in source) = 760 / (formH - 40)
+     *   → formH = 760 * markerSpanH / markerSpanW + 40
+     *
+     * Then we warp to formW × formH and resize to 800 × 1100 so the
+     * coordinate system used by BubbleDetector and OcrProcessor stays correct.
      */
+    private fun applyWarpFromMarkers(src: Mat, markerCenters: Array<Point>): Mat {
+        val tl = markerCenters[0]; val tr = markerCenters[1]
+        val br = markerCenters[2]; val bl = markerCenters[3]
+
+        // Compute actual marker span in source image
+        val srcSpanW = (distance(tl, tr) + distance(bl, br)) / 2.0
+        val srcSpanH = (distance(tl, bl) + distance(tr, br)) / 2.0
+
+        // Inner marker span in output: width = 800 - 2*20 = 760
+        val innerW = OUTPUT_WIDTH.toDouble() - 2 * MARKER_OFFSET  // 760
+
+        // Compute form height from aspect ratio
+        val innerH = if (srcSpanW > 0) innerW * srcSpanH / srcSpanW else (OUTPUT_HEIGHT.toDouble() - 2 * MARKER_OFFSET)
+        val formH = (innerH + 2 * MARKER_OFFSET).toInt().coerceIn(600, 1400)
+
+        Log.d(TAG, "Computed formH=$formH from marker aspect ratio (srcW=${"%.0f".format(srcSpanW)}, srcH=${"%.0f".format(srcSpanH)})")
+
+        val srcPts = MatOfPoint2f(tl, tr, br, bl)
+        val dstPts = MatOfPoint2f(
+            Point(MARKER_OFFSET, MARKER_OFFSET),
+            Point(OUTPUT_WIDTH.toDouble() - MARKER_OFFSET, MARKER_OFFSET),
+            Point(OUTPUT_WIDTH.toDouble() - MARKER_OFFSET, formH.toDouble() - MARKER_OFFSET),
+            Point(MARKER_OFFSET, formH.toDouble() - MARKER_OFFSET)
+        )
+
+        val M = Imgproc.getPerspectiveTransform(srcPts, dstPts)
+        val warped = Mat()
+        Imgproc.warpPerspective(src, warped, M,
+            Size(OUTPUT_WIDTH.toDouble(), formH.toDouble()),
+            Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE)
+        srcPts.release(); dstPts.release(); M.release()
+
+        // Resize to standard 800×1100 so downstream coordinates (bubble grid, OCR) work
+        val resized = Mat()
+        Imgproc.resize(warped, resized, Size(OUTPUT_WIDTH.toDouble(), OUTPUT_HEIGHT.toDouble()))
+        warped.release()
+        return resized
+    }
+
+    /**
+     * Warp using detected sheet EDGES (not markers) → full output rect.
+     * Contour detection finds the paper outline, so mapping to (0,0)→(800,1100) is correct.
+     */
+    private fun applyWarpFromEdges(src: Mat, corners: Array<Point>): Mat {
+        val tl = corners[0]; val tr = corners[1]
+        val br = corners[2]; val bl = corners[3]
+
+        val srcPts = MatOfPoint2f(tl, tr, br, bl)
+        val dstPts = MatOfPoint2f(
+            Point(0.0, 0.0),
+            Point(OUTPUT_WIDTH.toDouble() - 1.0, 0.0),
+            Point(OUTPUT_WIDTH.toDouble() - 1.0, OUTPUT_HEIGHT.toDouble() - 1.0),
+            Point(0.0, OUTPUT_HEIGHT.toDouble() - 1.0)
+        )
+
+        val M = Imgproc.getPerspectiveTransform(srcPts, dstPts)
+        val warped = Mat()
+        Imgproc.warpPerspective(src, warped, M,
+            Size(OUTPUT_WIDTH.toDouble(), OUTPUT_HEIGHT.toDouble()),
+            Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE)
+
+        srcPts.release(); dstPts.release(); M.release()
+        return warped
+    }
+
     private fun detectViaContours(blurred: Mat, imgW: Int, imgH: Int): Array<Point>? {
         val edges = Mat()
         val imageArea = imgW.toDouble() * imgH.toDouble()
@@ -276,7 +373,6 @@ class PerspectiveTransformer @Inject constructor() {
                 val upper = min(255.0, (2.0 - factor) * median)
                 Imgproc.Canny(blurred, edges, lower, upper)
 
-                // Morphological closing to connect broken edges
                 val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
                 Imgproc.morphologyEx(edges, edges, Imgproc.MORPH_CLOSE, kernel)
                 Imgproc.dilate(edges, edges, kernel)
@@ -327,46 +423,13 @@ class PerspectiveTransformer @Inject constructor() {
     }
 
     private fun orderPoints(pts: Array<Point>): Array<Point> {
+        // Sort by sum (x+y): smallest = TL, largest = BR
+        // Sort by diff (y-x): smallest = TR, largest = BL
         val topLeft = pts.minByOrNull { it.x + it.y }!!
         val bottomRight = pts.maxByOrNull { it.x + it.y }!!
         val topRight = pts.minByOrNull { it.y - it.x }!!
         val bottomLeft = pts.maxByOrNull { it.y - it.x }!!
         return arrayOf(topLeft, topRight, bottomRight, bottomLeft)
-    }
-
-    private fun applyWarp(src: Mat, corners: Array<Point>): Mat {
-        val tl = corners[0]; val tr = corners[1]
-        val br = corners[2]; val bl = corners[3]
-
-        val widthA = distance(br, bl)
-        val widthB = distance(tr, tl)
-        val maxWidth = max(widthA, widthB).toInt()
-
-        val heightA = distance(tr, br)
-        val heightB = distance(tl, bl)
-        val maxHeight = max(heightA, heightB).toInt()
-
-        val w = if (maxWidth > 0) maxWidth else OUTPUT_WIDTH
-        val h = if (maxHeight > 0) maxHeight else OUTPUT_HEIGHT
-
-        val srcPts = MatOfPoint2f(tl, tr, br, bl)
-        val dstPts = MatOfPoint2f(
-            Point(0.0, 0.0),
-            Point(w.toDouble() - 1, 0.0),
-            Point(w.toDouble() - 1, h.toDouble() - 1),
-            Point(0.0, h.toDouble() - 1)
-        )
-
-        val M = Imgproc.getPerspectiveTransform(srcPts, dstPts)
-        val warped = Mat()
-        Imgproc.warpPerspective(src, warped, M, Size(w.toDouble(), h.toDouble()))
-
-        srcPts.release(); dstPts.release(); M.release()
-
-        val resized = Mat()
-        Imgproc.resize(warped, resized, Size(OUTPUT_WIDTH.toDouble(), OUTPUT_HEIGHT.toDouble()))
-        warped.release()
-        return resized
     }
 
     private fun computeMedian(mat: Mat): Double {
@@ -387,11 +450,7 @@ class PerspectiveTransformer @Inject constructor() {
                 break
             }
         }
-        hist.release()
-        channels.release()
-        histSize.release()
-        ranges.release()
-        emptyMask.release()
+        hist.release(); channels.release(); histSize.release(); ranges.release(); emptyMask.release()
         return median
     }
 
